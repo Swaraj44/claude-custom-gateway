@@ -1,0 +1,311 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ClaudeBridge</title>
+<style>
+  :root {
+    color-scheme: dark;
+    --bg: #0b0e14;
+    --panel: #11151d;
+    --panel-2: #161b26;
+    --border: #232a38;
+    --border-focus: #d97757;
+    --text: #e6edf3;
+    --text-dim: #8b96a5;
+    --text-faint: #5b6472;
+    --accent: #d97757;
+    --accent-hover: #e08a6d;
+    --green: #3fb950;
+    --red: #f85149;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Inter, Arial, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    display: flex;
+    flex-direction: column;
+  }
+
+  /* Header */
+  header {
+    display: flex; align-items: center; gap: 12px;
+    padding: 14px 24px;
+    background: rgba(17, 21, 29, .85);
+    border-bottom: 1px solid var(--border);
+    backdrop-filter: blur(8px);
+    position: sticky; top: 0; z-index: 10;
+  }
+  .logo {
+    width: 34px; height: 34px; border-radius: 9px; flex: none;
+    background: linear-gradient(135deg, #d97757, #b45309);
+    display: grid; place-items: center;
+    font-weight: 700; font-size: 16px; color: #fff;
+    box-shadow: 0 2px 10px rgba(217, 119, 87, .35);
+  }
+  .title { font-size: 15px; font-weight: 650; letter-spacing: .2px; }
+  .subtitle { font-size: 11.5px; color: var(--text-dim); margin-top: 1px; }
+  header .spacer { flex: 1; }
+  .status-pill {
+    display: inline-flex; align-items: center; gap: 7px;
+    font-size: 12px; color: var(--text-dim);
+    background: var(--panel-2); border: 1px solid var(--border);
+    padding: 5px 12px; border-radius: 999px; white-space: nowrap;
+  }
+  .status-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--text-faint); }
+  .status-pill.stream .status-dot { background: var(--accent); animation: pulse 1s infinite; }
+  .status-pill.done .status-dot { background: var(--green); }
+  .status-pill.error .status-dot { background: var(--red); }
+  @keyframes pulse { 50% { opacity: .3; } }
+
+  /* Layout */
+  main { flex: 1; display: flex; flex-direction: column; width: 100%; max-width: 860px; margin-inline: auto; padding: 20px 24px 8px; gap: 14px; }
+
+  /* Chat area */
+  #chat {
+    flex: 1; min-height: 220px; overflow-y: auto;
+    background: var(--panel); border: 1px solid var(--border); border-radius: 12px;
+    padding: 18px; scroll-behavior: smooth;
+  }
+  #chat:empty::before {
+    content: "Start a conversation below. Responses stream in real time.";
+    color: var(--text-faint); font-size: 13.5px;
+    display: grid; place-items: center; min-height: 180px; text-align: center;
+  }
+  .msg { display: flex; gap: 10px; margin-bottom: 16px; animation: fade .18s ease; }
+  @keyframes fade { from { opacity: 0; transform: translateY(3px); } }
+  .avatar {
+    width: 26px; height: 26px; border-radius: 7px; flex: none; margin-top: 2px;
+    display: grid; place-items: center; font-size: 11px; font-weight: 700;
+  }
+  .msg.user .avatar { background: #2d333b; color: var(--text-dim); }
+  .msg.assistant .avatar { background: linear-gradient(135deg, #d97757, #b45309); color: #fff; }
+  .bubble {
+    flex: 1; font-size: 14px; line-height: 1.65;
+    white-space: pre-wrap; word-break: break-word;
+  }
+  .msg.user .bubble { color: var(--text-dim); }
+  .msg.assistant .bubble { color: var(--text); }
+  .bubble .err { color: var(--red); }
+
+  /* Composer */
+  .composer {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 12px;
+    padding: 14px; display: flex; flex-direction: column; gap: 10px;
+    transition: border-color .15s;
+  }
+  .composer:focus-within { border-color: var(--border-focus); }
+  textarea {
+    width: 100%; height: 96px; resize: vertical;
+    background: transparent; border: none; outline: none;
+    color: var(--text); font: inherit; font-size: 14px; line-height: 1.5;
+  }
+  textarea::placeholder { color: var(--text-faint); }
+  .controls { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  select, input {
+    background: var(--panel-2); color: var(--text);
+    border: 1px solid var(--border); border-radius: 8px;
+    padding: 7px 10px; font: inherit; font-size: 13px;
+    transition: border-color .15s, box-shadow .15s;
+  }
+  select:focus, input:focus {
+    outline: none; border-color: var(--border-focus);
+    box-shadow: 0 0 0 3px rgba(217, 119, 87, .15);
+  }
+  select { cursor: pointer; }
+  #apikey { width: 130px; }
+  #session { flex: 1; min-width: 160px; color: var(--text-faint); font-size: 12px; }
+  .btns { display: flex; gap: 8px; align-items: center; }
+  button {
+    font: inherit; font-size: 13.5px; font-weight: 600;
+    border-radius: 8px; padding: 8px 18px; cursor: pointer;
+    border: 1px solid transparent; transition: background .15s, border-color .15s;
+    display: inline-flex; align-items: center; gap: 7px;
+  }
+  #send { background: var(--accent); color: #fff; }
+  #send:hover:not(:disabled) { background: var(--accent-hover); }
+  #send:disabled { opacity: .55; cursor: wait; }
+  #newchat { background: var(--panel-2); color: var(--text-dim); border-color: var(--border); }
+  #newchat:hover { color: var(--text); border-color: #39414f; }
+  .hint { font-size: 11.5px; color: var(--text-faint); margin-left: auto; }
+  kbd {
+    background: var(--panel-2); border: 1px solid var(--border); border-bottom-width: 2px;
+    border-radius: 5px; padding: 1px 5px; font-size: 10.5px; font-family: inherit;
+  }
+
+  /* Footer */
+  footer {
+    text-align: center; padding: 14px; font-size: 12px; color: var(--text-faint);
+  }
+  footer a { color: var(--text-dim); text-decoration: none; }
+  footer a:hover { color: var(--accent); }
+  footer .sep { margin: 0 8px; color: var(--border); }
+  .credit { color: var(--text-dim); }
+  .credit b { color: var(--accent); font-weight: 650; }
+
+  @media (max-width: 640px) {
+    header { padding: 12px 16px; }
+    main { padding: 14px 16px 8px; }
+    .hint { display: none; }
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="logo">CB</div>
+  <div>
+    <div class="title">ClaudeBridge</div>
+    <div class="subtitle">Streaming REST gateway to the Claude Code CLI</div>
+  </div>
+  <div class="spacer"></div>
+  <div class="status-pill" id="statusPill"><span class="status-dot"></span><span id="status">idle</span></div>
+</header>
+
+<main>
+  <div id="chat"></div>
+
+  <div class="composer">
+    <textarea id="prompt" placeholder="Ask Claude anything..."></textarea>
+    <div class="controls">
+      <select id="model">
+        <option value="">Default model</option>
+        <option value="sonnet">Sonnet</option>
+        <option value="opus">Opus</option>
+        <option value="haiku">Haiku</option>
+      </select>
+      <input id="apikey" placeholder="API key" value="swaraj">
+      <input id="session" value="session: none" readonly>
+    </div>
+    <div class="btns">
+      <button id="send">Send</button>
+      <button id="newchat">New chat</button>
+      <span class="hint"><kbd>Ctrl</kbd> + <kbd>Enter</kbd> to send</span>
+    </div>
+  </div>
+</main>
+
+<footer>
+  <a href="/docs">API docs</a><span class="sep">|</span>
+  <a href="/health">Health</a><span class="sep">|</span>
+  POST /api/chat &middot; POST /api/chat/stream (SSE)
+  <br><span class="credit">Developed by <b>Swaraj</b></span>
+</footer>
+
+<script>
+let sessionId = null;
+const chat = document.getElementById('chat');
+const statusEl = document.getElementById('status');
+const statusPill = document.getElementById('statusPill');
+const sendBtn = document.getElementById('send');
+let streamTarget = null;
+
+function setStatus(text, cls) {
+  statusEl.textContent = text;
+  statusPill.className = 'status-pill' + (cls ? ' ' + cls : '');
+}
+function scrollChat() { chat.scrollTop = chat.scrollHeight; }
+function addUserMsg(text) {
+  const div = document.createElement('div');
+  div.className = 'msg user';
+  div.innerHTML = '<div class="avatar">Y</div><div class="bubble"></div>';
+  div.querySelector('.bubble').textContent = text;
+  chat.appendChild(div);
+  scrollChat();
+}
+function addAssistantMsg() {
+  const div = document.createElement('div');
+  div.className = 'msg assistant';
+  div.innerHTML = '<div class="avatar">C</div><div class="bubble"></div>';
+  chat.appendChild(div);
+  streamTarget = div.querySelector('.bubble');
+  scrollChat();
+}
+function appendText(text, cls) {
+  if (!streamTarget) addAssistantMsg();
+  if (cls) {
+    const span = document.createElement('span');
+    span.className = cls;
+    span.textContent = text;
+    streamTarget.appendChild(span);
+  } else {
+    streamTarget.appendChild(document.createTextNode(text));
+  }
+  scrollChat();
+}
+
+document.getElementById('prompt').addEventListener('keydown', e => {
+  if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') send();
+});
+sendBtn.addEventListener('click', send);
+document.getElementById('newchat').addEventListener('click', () => {
+  sessionId = null;
+  streamTarget = null;
+  document.getElementById('session').value = 'session: none';
+  chat.textContent = '';
+  setStatus('idle', '');
+});
+
+async function send() {
+  const promptEl = document.getElementById('prompt');
+  const prompt = promptEl.value.trim();
+  if (!prompt) return;
+  const model = document.getElementById('model').value || null;
+  sendBtn.disabled = true;
+  setStatus('streaming...', 'stream');
+  addUserMsg(prompt);
+  addAssistantMsg();
+  promptEl.value = '';
+  try {
+    const res = await fetch('/api/chat/stream', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-API-Key': document.getElementById('apikey').value.trim()
+      },
+      body: JSON.stringify({ prompt, model, session_id: sessionId })
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || ('HTTP ' + res.status));
+    }
+    const reader = res.body.getReader();
+    const dec = new TextDecoder();
+    let buf = '';
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      let i;
+      while ((i = buf.indexOf('\n\n')) >= 0) {
+        const raw = buf.slice(0, i);
+        buf = buf.slice(i + 2);
+        for (const line of raw.split('\n')) {
+          if (line.startsWith('data: ')) handleEvent(JSON.parse(line.slice(6)));
+        }
+      }
+    }
+    if (!statusEl.textContent.startsWith('done')) setStatus('done', 'done');
+  } catch (e) {
+    appendText('[error] ' + e.message, 'err');
+    setStatus('error', 'error');
+  }
+  sendBtn.disabled = false;
+}
+
+function handleEvent(ev) {
+  if (ev.text) appendText(ev.text);
+  if (ev.session_id) {
+    sessionId = ev.session_id;
+    document.getElementById('session').value = 'session: ' + sessionId;
+  }
+  if (ev.cost_usd != null) setStatus('done (cost $' + ev.cost_usd.toFixed(4) + ')', 'done');
+  if (ev.error) appendText('[error] ' + ev.error, 'err');
+}
+</script>
+</body>
+</html>

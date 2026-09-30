@@ -24,6 +24,7 @@ def chat(req: ChatRequest):
         cost_usd=data.get("total_cost_usd"),
         duration_ms=data.get("duration_ms"),
         is_error=data.get("is_error", False),
+        usage=data.get("usage") or None,
     )
 
 
@@ -50,6 +51,7 @@ def event_stream(prompt: str, model: Optional[str], session_id: Optional[str]):
                 "cost_usd": ev["cost_usd"],
                 "duration_ms": ev["duration_ms"],
                 "is_error": ev["is_error"],
+                "usage": ev.get("usage") or {},
             }
             if not emitted and ev["result"]:
                 payload["text"] = ev["result"]

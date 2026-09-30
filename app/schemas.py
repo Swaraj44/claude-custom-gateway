@@ -29,6 +29,7 @@ class ChatResponse(BaseModel):
     cost_usd: Optional[float] = None
     duration_ms: Optional[float] = None
     is_error: bool = False
+    usage: Optional[dict] = None
 
 
 class OpenAIMessage(BaseModel):
@@ -53,6 +54,26 @@ class OpenAIMessage(BaseModel):
             return "".join(parts)
         return str(self.content)
 
+    def images(self) -> List[dict]: 
+        if not isinstance(self.content, list):
+            return []
+        blocks = []
+        for p in self.content:
+            if not isinstance(p, dict) or p.get("type") != "image_url":
+                continue
+            url = (p.get("image_url") or {}).get("url") or ""
+            header, sep, data = url.partition(",")
+            if not sep or not header.lower().startswith("data:"):
+                continue
+            media_type = header[5:].split(";", 1)[0].strip().lower() or "image/png"
+            if media_type not in ("image/jpeg", "image/png", "image/gif", "image/webp"):
+                continue
+            blocks.append({
+                "type": "image",
+                "source": {"type": "base64", "media_type": media_type, "data": data},
+            })
+        return blocks
+
 
 class ChatCompletionRequest(BaseModel):
     model: Optional[str] = None
@@ -60,6 +81,7 @@ class ChatCompletionRequest(BaseModel):
     stream: bool = False
     tools: Optional[List[dict]] = None
     tool_choice: Optional[Any] = None
+    stream_options: Optional[dict] = None
 
     @field_validator("messages")
     @classmethod

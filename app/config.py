@@ -27,6 +27,7 @@ class Settings:
     timeout: int = 600
     api_key: str = "swaraj"
     models: Tuple[str, ...] = ("sonnet", "opus", "haiku")
+    vision_model: str = "sonnet"
     system_prompt_max: int = 100_000
     claude_bin: str = "claude"
 
@@ -37,6 +38,7 @@ def load_settings() -> Settings:
         port=int(os.environ.get("CLAUDE_SERVICE_PORT", "8000")),
         timeout=int(os.environ.get("CLAUDE_SERVICE_TIMEOUT", "600")),
         api_key=os.environ.get("CLAUDE_SERVICE_API_KEY", "swaraj"),
+        vision_model=os.environ.get("CLAUDE_SERVICE_VISION_MODEL", "sonnet"),
         claude_bin=_find_claude_bin(),
     )
 

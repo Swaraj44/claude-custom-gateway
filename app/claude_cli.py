@@ -12,10 +12,15 @@ from app.utils import error
 
 def build_cmd(model: Optional[str] = None, session_id: Optional[str] = None,
               stream: bool = False, system_prompt: Optional[str] = None,
-              raw_model: bool = False) -> List[str]:
-    cmd = [settings.claude_bin, "-p", "--output-format", "stream-json" if stream else "json"]
-    if stream:
+              raw_model: bool = False, stream_input: bool = False) -> List[str]:
+    output_format = "stream-json" if (stream or stream_input) else "json"
+    cmd = [settings.claude_bin, "-p", "--output-format", output_format]
+    if stream or stream_input:
         cmd.append("--verbose")
+    if stream_input:
+        # Required for passing image content blocks via stdin. The CLI mandates
+        # stream-json output whenever input-format is stream-json.
+        cmd += ["--input-format", "stream-json"]
     if raw_model:
         cmd += ["--tools", "", "--strict-mcp-config"]
     if system_prompt:
@@ -37,14 +42,24 @@ def kill_process(proc: subprocess.Popen) -> None:
             except OSError:
                 pass
 
+#Wrap the prompt for CLI stdin: stream-json user message when images are present.
+def stdin_payload(prompt: str, content_blocks: Optional[List[dict]]) -> str:
+
+    if content_blocks is None:
+        return prompt
+    return json.dumps({"type": "user", "message": {"role": "user", "content": content_blocks}})
+
 
 def run_claude_once(prompt: str, model: Optional[str] = None, session_id: Optional[str] = None,
-                    system_prompt: Optional[str] = None, raw_model: bool = False):
-    cmd = build_cmd(model, session_id, stream=False, system_prompt=system_prompt, raw_model=raw_model)
+                    system_prompt: Optional[str] = None, raw_model: bool = False,
+                    content_blocks: Optional[List[dict]] = None):
+    stream_input = content_blocks is not None
+    cmd = build_cmd(model, session_id, stream=stream_input, system_prompt=system_prompt,
+                    raw_model=raw_model, stream_input=stream_input)
     try:
         proc = subprocess.run(
             cmd,
-            input=prompt,
+            input=stdin_payload(prompt, content_blocks),
             capture_output=True,
             text=True,
             encoding="utf-8",
@@ -54,20 +69,41 @@ def run_claude_once(prompt: str, model: Optional[str] = None, session_id: Option
         return None, error(500, "claude CLI not found at '%s'" % settings.claude_bin)
     except subprocess.TimeoutExpired:
         return None, error(504, "claude CLI timed out after %ds" % settings.timeout)
-    if proc.returncode != 0:
-        err = (proc.stderr or "").strip()
-        if not err:
-            err = (proc.stdout or "").strip()[:500]
-        return None, error(502, err or "claude CLI exited with code %d" % proc.returncode)
-    try:
-        return json.loads(proc.stdout), None
-    except json.JSONDecodeError:
-        return None, error(502, "claude CLI returned invalid JSON")
+    if not stream_input:
+        if proc.returncode != 0:
+            err = (proc.stderr or "").strip()
+            if not err:
+                err = (proc.stdout or "").strip()[:500]
+            return None, error(502, err or "claude CLI exited with code %d" % proc.returncode)
+        try:
+            return json.loads(proc.stdout), None
+        except json.JSONDecodeError:
+            return None, error(502, "claude CLI returned invalid JSON")
+    result_event = None
+    for line in proc.stdout.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if event.get("type") == "result":
+            result_event = event
+    if result_event is not None:
+        return result_event, None
+    err = (proc.stderr or "").strip()
+    if not err:
+        err = (proc.stdout or "").strip()[:500]
+    return None, error(502, err or "claude CLI exited with code %d" % proc.returncode)
 
 
 def claude_events(prompt: str, model: Optional[str] = None, session_id: Optional[str] = None,
-                  system_prompt: Optional[str] = None, raw_model: bool = False):
-    cmd = build_cmd(model, session_id, stream=True, system_prompt=system_prompt, raw_model=raw_model)
+                  system_prompt: Optional[str] = None, raw_model: bool = False,
+                  content_blocks: Optional[List[dict]] = None):
+    stream_input = content_blocks is not None
+    cmd = build_cmd(model, session_id, stream=True, system_prompt=system_prompt,
+                    raw_model=raw_model, stream_input=stream_input)
     stderr_file = tempfile.TemporaryFile(mode="w+", encoding="utf-8")
     try:
         proc = subprocess.Popen(
@@ -86,7 +122,7 @@ def claude_events(prompt: str, model: Optional[str] = None, session_id: Optional
 
     def feed_stdin():
         try:
-            proc.stdin.write(prompt)
+            proc.stdin.write(stdin_payload(prompt, content_blocks))
             proc.stdin.close()
         except (BrokenPipeError, ValueError, OSError):
             pass

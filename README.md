@@ -33,35 +33,13 @@
 
 > **Important:** This service does not handle Claude authentication itself — it shells out to the `claude` CLI. You **must** install the CLI and log in before using this project.
 
+> **Platform support:** These setup instructions have been **fully tested on Linux**. The Windows and macOS instructions are provided as guidance but **have not been tested yet** — if you hit a problem on those platforms, see [Troubleshooting](#troubleshooting).
+
 ## Step 1 — Install & Authenticate the Claude CLI
 
 Pick your operating system. After installing, run `claude` once in your terminal and follow the login flow (browser-based OAuth with your Claude Pro/Max account, or an Anthropic Console API key).
 
-### Windows
-
-**Option A — Native installer (PowerShell):**
-
-```powershell
-irm https://claude.ai/install.ps1 | iex
-```
-
-**Option B — npm:**
-
-```powershell
-npm install -g @anthropic-ai/claude-code
-```
-
-> **WSL note:** The CLI also runs great inside WSL. If you prefer that route, follow the Linux instructions inside your WSL distro and run this service there too.
-
-**Authenticate:**
-
-```powershell
-claude
-```
-
-The first run starts the login wizard — choose **Claude account** (Pro/Max subscription) or **Anthropic Console account** (API key) and complete the flow in your browser.
-
-### Linux
+### Linux (tested)
 
 **Option A — Native installer:**
 
@@ -83,7 +61,31 @@ claude
 
 Follow the interactive login wizard (Claude account via browser, or Console API key).
 
-### macOS
+### Windows (untested)
+
+**Option A — Native installer (PowerShell):**
+
+```powershell
+irm https://claude.ai/install.ps1 | iex
+```
+
+**Option B — npm:**
+
+```powershell
+npm install -g @anthropic-ai/claude-code
+```
+
+> **WSL note:** The CLI also runs great inside WSL. If you prefer that route, follow the Linux instructions inside your WSL distro and run this service there too — that path is covered by the tested Linux setup.
+
+**Authenticate:**
+
+```powershell
+claude
+```
+
+The first run starts the login wizard — choose **Claude account** (Pro/Max subscription) or **Anthropic Console account** (API key) and complete the flow in your browser.
+
+### macOS (untested)
 
 **Option A — Native installer:**
 
@@ -125,7 +127,21 @@ If that prints a version, you're done with Step 1. If not, see [Troubleshooting]
 
 Clone the repository, create a virtual environment, and install dependencies.
 
-### Windows (PowerShell)
+### Linux (tested)
+
+```bash
+git clone <repository-url>
+cd claude-bridge
+python3 -m venv .venv        # or: uv venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+### macOS (untested)
+
+Same as Linux — `python3` may be just `python` depending on your install.
+
+### Windows (PowerShell, untested)
 
 ```powershell
 git clone <repository-url>
@@ -141,23 +157,13 @@ pip install -r requirements.txt
 > Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
 > ```
 
-### Windows (Command Prompt)
+### Windows (Command Prompt, untested)
 
 ```bat
 git clone <repository-url>
 cd claude-bridge
 python -m venv .venv
 .venv\Scripts\activate.bat
-pip install -r requirements.txt
-```
-
-### Linux / macOS
-
-```bash
-git clone <repository-url>
-cd claude-bridge
-python3 -m venv .venv        # or: uv venv .venv
-source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
@@ -203,21 +209,21 @@ claude-bridge
 
 **Set a variable before launching — per OS:**
 
+```bash
+# Linux / macOS (tested on Linux)
+CLAUDE_SERVICE_PORT=9000 python -m app
+```
+
 ```powershell
-# Windows (PowerShell)
+# Windows (PowerShell) — untested
 $env:CLAUDE_SERVICE_PORT = "9000"
 python -m app
 ```
 
 ```bat
-:: Windows (Command Prompt)
+:: Windows (Command Prompt) — untested
 set CLAUDE_SERVICE_PORT=9000
 python -m app
-```
-
-```bash
-# Linux / macOS
-CLAUDE_SERVICE_PORT=9000 python -m app
 ```
 
 See [`.env.example`](.env.example) for reference (the service reads process environment variables; it does not load the file automatically).
@@ -257,6 +263,7 @@ Point the client at the base URL `http://<host>:8000/v1` with the API key above,
 ### How the mapping works
 
 - The client sends OpenAI-style `messages` (system + user + assistant history).
+- **Images are supported:** `user` messages with content-part arrays may include `{"type": "image_url", "image_url": {"url": "data:image/png;base64,..."}}` (JPEG/PNG/GIF/WebP data URLs). When images are present, the service sends the conversation to the CLI as a stream-json user message containing base64 image blocks — so pasting screenshots into Kilo Code works. Remote (`http:///https://`) image URLs are not fetched; they are skipped.
 - The service extracts the `system` message and passes it to the CLI via `--system-prompt` (replacing Claude Code's own agent system prompt).
 - The remaining messages are flattened into a conversation transcript and sent to `claude -p` via stdin.
 - **Raw-model mode:** `/v1/*` requests run the CLI with all tools disabled (`--tools "" --strict-mcp-config`), so the model answers only from the messages the client sends — it never reads or writes files itself. Tool execution is the client's job.
@@ -265,6 +272,7 @@ Point the client at the base URL `http://<host>:8000/v1` with the API key above,
 - The native `/api/*` endpoints keep the CLI's full agent capabilities (it can read/analyze files in its working directory).
 - Joined system messages are truncated to 100,000 characters (`SYSTEM_PROMPT_MAX`) — large system prompts are cut silently.
 - Streaming responses are converted from the CLI's `stream-json` events into OpenAI `chat.completion.chunk` SSE events.
+- **Prompt caching works** (verified live): the CLI marks cache breakpoints and the flattened prompt is append-only, so consecutive requests within the ~5-min cache TTL reuse the cached prefix. The `/v1` `usage` block reports `prompt_tokens_details.cached_tokens` plus raw `cache_read_input_tokens` / `cache_creation_input_tokens` so cache hits are visible in real sessions.
 
 ### Security
 
@@ -491,6 +499,8 @@ The model then answers using the result. Parallel calls (multiple invokes in one
 ---
 
 ## How It Works
+
+> See [`docs/HOW_IT_WORKS.md`](docs/HOW_IT_WORKS.md) for a detailed step-by-step description of the request process with worked examples.
 
 ```
 client ──HTTP──> FastAPI (uvicorn) ──stdin──> claude -p --output-format stream-json --verbose

@@ -54,7 +54,8 @@ class OpenAIMessage(BaseModel):
             return "".join(parts)
         return str(self.content)
 
-    def images(self) -> List[dict]: 
+    def images(self) -> List[dict]:
+        """Extract base64 data-URL images as Anthropic image content blocks."""
         if not isinstance(self.content, list):
             return []
         blocks = []

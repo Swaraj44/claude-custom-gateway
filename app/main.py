@@ -11,16 +11,19 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from app import __version__
 from app.config import settings
 from app.apis import api_router
+from app import payload_logging
+from app.payload_logging import PayloadLoggingMiddleware
 
 
 def create_app() -> FastAPI:
-    app = FastAPI(title="ClaudeBridge", version=__version__)
+    app = FastAPI(title="Claude Custom Gateway", version=__version__)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=["*"],
         allow_methods=["*"],
         allow_headers=["*"],
     )
+    app.add_middleware(PayloadLoggingMiddleware)
     app.include_router(api_router)
 
     @app.exception_handler(RequestValidationError)
@@ -49,7 +52,7 @@ app = create_app()
 def main() -> None:
     if shutil.which("claude") is None:
         print("warning: 'claude' CLI not found on PATH; requests will fail until it is available", file=sys.stderr)
-    print("ClaudeBridge (FastAPI) running")
+    print("Claude Custom Gateway (FastAPI) running")
     print("  Web UI:    http://%s:%d/" % (settings.host, settings.port))
     print("  Chat API:  POST http://%s:%d/api/chat" % (settings.host, settings.port))
     print("  Stream:    POST http://%s:%d/api/chat/stream  (SSE)" % (settings.host, settings.port))
@@ -60,12 +63,23 @@ def main() -> None:
     
     if settings.host in ("0.0.0.0", "::"):
         print("  Note:      listening on all interfaces — use http://127.0.0.1:%d/ locally or http://<your-ip>:%d/ from your network" % (settings.port, settings.port))
+    print("  Payloads:  %s" % ("logging requests/responses" if payload_logging.enabled else "not logged"))
     if settings.api_key:
         print("  Auth:      API key required (CLAUDE_SERVICE_API_KEY is set)")
     print("  Claude:    %s | timeout: %ds | models: %s"
           % (settings.claude_bin, settings.timeout, ", ".join(settings.models)))
     print("Press Ctrl+C to stop")
     uvicorn.run(app, host=settings.host, port=settings.port, log_level="info")
+
+
+def main_pro() -> None:
+    payload_logging.enabled = False
+    main()
+
+
+def main_debug() -> None:
+    payload_logging.enabled = True
+    main()
 
 
 if __name__ == "__main__":

@@ -4,10 +4,13 @@ import signal
 import subprocess
 import tempfile
 import threading
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from app.config import settings
 from app.utils import error
+
+
+DEFAULT_RAW_SYSTEM_PROMPT = "You are a helpful assistant."
 
 
 def build_cmd(model: Optional[str] = None, session_id: Optional[str] = None,
@@ -23,6 +26,11 @@ def build_cmd(model: Optional[str] = None, session_id: Optional[str] = None,
         cmd += ["--input-format", "stream-json"]
     if raw_model:
         cmd += ["--tools", "", "--strict-mcp-config"]
+        if settings.effort:
+            cmd += ["--effort", settings.effort]
+        # Without --system-prompt the CLI sends its full coding-agent prompt
+        # (~3k tokens), which a plain chat request neither wants nor pays for.
+        system_prompt = system_prompt or DEFAULT_RAW_SYSTEM_PROMPT
     if system_prompt:
         cmd += ["--system-prompt", system_prompt]
     if model:
@@ -30,6 +38,28 @@ def build_cmd(model: Optional[str] = None, session_id: Optional[str] = None,
     if session_id:
         cmd += ["--resume", session_id]
     return cmd
+
+
+# Set when the gateway is started from inside a Claude Code session. Inherited,
+# they make the child CLI inject a per-call scratchpad path (a new UUID in every
+# prompt) and can force settings such as the effort level.
+PARENT_SESSION_ENV = (
+    "CLAUDECODE", "CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_CHILD_SESSION", "CLAUDE_CODE_ENTRYPOINT",
+    "CLAUDE_CODE_EXECPATH", "CLAUDE_CODE_MESSAGING_SOCKET", "CLAUDE_CODE_MESSAGING_TOKEN",
+    "CLAUDE_CODE_SESSION_ATTENDED", "CLAUDE_CODE_EMIT_STARTUP_TIMING",
+    "CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING", "CLAUDE_CODE_ENABLE_TASKS", "CLAUDE_PID",
+    "CLAUDE_EFFORT", "CLAUDE_AGENT_SDK_VERSION", "AI_AGENT",
+)
+
+
+def cli_env(raw_model: bool = False) -> Dict[str, str]:
+    env = {k: v for k, v in os.environ.items() if k not in PARENT_SESSION_ENV}
+    if raw_model:
+        # OpenAI-compatible calls bring their own system prompt; keep CLAUDE.md
+        # files and auto-memory from being added to every request.
+        env["CLAUDE_CODE_DISABLE_CLAUDE_MDS"] = "1"
+        env["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] = "1"
+    return env
 
 
 def kill_process(proc: subprocess.Popen) -> None:
@@ -42,17 +72,40 @@ def kill_process(proc: subprocess.Popen) -> None:
             except OSError:
                 pass
 
-#Wrap the prompt for CLI stdin: stream-json user message when images are present.
-def stdin_payload(prompt: str, content_blocks: Optional[List[dict]]) -> str:
 
+def stdin_payload(prompt: str, content_blocks: Optional[List[dict]]) -> str:
+    """Wrap the prompt for CLI stdin: stream-json user message when images are present."""
     if content_blocks is None:
         return prompt
-    return json.dumps({"type": "user", "message": {"role": "user", "content": content_blocks}})
+    blocks = content_blocks
+    if blocks and settings.prompt_cache_ttl in ("1h", "5m"):
+        # The CLI does not cache the user message itself; marking its last block
+        # lets the next turn (same blocks + new ones) read this history from cache.
+        # The CLI's own breakpoints use 1h on subscription logins, and a 1h
+        # breakpoint may not follow a 5m one, so the TTL must match the CLI's.
+        blocks = list(blocks)
+        blocks[-1] = dict(blocks[-1], cache_control={"type": "ephemeral", "ttl": settings.prompt_cache_ttl})
+    return json.dumps({"type": "user", "message": {"role": "user", "content": blocks}})
+
+
+# Returned by the CLI as the whole reply when the API flagged a native tool call
+# it could not use (the CLI runs with no tools here) and its own retry failed.
+MALFORMED_TOOL_USE_RESULT = "The model's tool call could not be parsed (retry also failed)."
 
 
 def run_claude_once(prompt: str, model: Optional[str] = None, session_id: Optional[str] = None,
                     system_prompt: Optional[str] = None, raw_model: bool = False,
                     content_blocks: Optional[List[dict]] = None):
+    data, err = _run_claude_once(prompt, model, session_id, system_prompt, raw_model, content_blocks)
+    if raw_model and err is None and (data.get("result") or "").strip() == MALFORMED_TOOL_USE_RESULT:
+        # Sampling usually differs on a fresh run; one retry beats failing the agent's turn.
+        data, err = _run_claude_once(prompt, model, session_id, system_prompt, raw_model, content_blocks)
+    return data, err
+
+
+def _run_claude_once(prompt: str, model: Optional[str], session_id: Optional[str],
+                     system_prompt: Optional[str], raw_model: bool,
+                     content_blocks: Optional[List[dict]]):
     stream_input = content_blocks is not None
     cmd = build_cmd(model, session_id, stream=stream_input, system_prompt=system_prompt,
                     raw_model=raw_model, stream_input=stream_input)
@@ -64,6 +117,7 @@ def run_claude_once(prompt: str, model: Optional[str] = None, session_id: Option
             text=True,
             encoding="utf-8",
             timeout=settings.timeout,
+            env=cli_env(raw_model),
         )
     except FileNotFoundError:
         return None, error(500, "claude CLI not found at '%s'" % settings.claude_bin)
@@ -114,6 +168,7 @@ def claude_events(prompt: str, model: Optional[str] = None, session_id: Optional
             text=True,
             encoding="utf-8",
             start_new_session=True,
+            env=cli_env(raw_model),
         )
     except FileNotFoundError:
         stderr_file.close()

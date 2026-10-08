@@ -33,8 +33,10 @@ def list_models():
 
 @router.post("/v1/chat/completions", dependencies=[Depends(check_api_key)])
 def openai_chat_completions(req: ChatCompletionRequest):
-    prompt, content_blocks, system_prompt = messages_to_prompt_and_blocks(req.messages)
     has_tools = bool(req.tools)
+    # Tool use means an agent loop that will send follow-up turns, so cache
+    # the first turn too.
+    prompt, content_blocks, system_prompt = messages_to_prompt_and_blocks(req.messages, transcript=has_tools)
     tool_names = set()
     for t in req.tools or []:
         fn = t.get("function") or {}
@@ -47,7 +49,8 @@ def openai_chat_completions(req: ChatCompletionRequest):
         return error(400, "messages must contain at least one message with text content")
     # Image content blocks require a vision-capable model; the CLI default may
     # not support images, so fall back to the configured vision model.
-    model = req.model or (settings.vision_model if content_blocks is not None else None)
+    has_images = any(b.get("type") == "image" for b in content_blocks or [])
+    model = req.model or (settings.vision_model if has_images else None)
     include_usage = bool((req.stream_options or {}).get("include_usage"))
     if req.stream:
         return StreamingResponse(
@@ -60,6 +63,8 @@ def openai_chat_completions(req: ChatCompletionRequest):
                                 content_blocks=content_blocks)
     if err is not None:
         return err
+    if data.get("is_error"):
+        return error(502, data.get("result") or "claude CLI reported an error")
     tool_calls, content = parse_function_calls(data.get("result", ""), tool_names or None)
     message = {"role": "assistant", "content": content if content else None}
     if tool_calls:

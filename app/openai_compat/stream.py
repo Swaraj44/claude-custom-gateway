@@ -73,6 +73,11 @@ def openai_stream(model: Optional[str], prompt: str, system_prompt: Optional[str
             yield chunk(delta={"content": "\n[service error] %s" % message})
             yield chunk(finish_reason="stop")
         else:
+            if data.get("is_error"):
+                yield chunk(delta={"content": "\n[service error] %s" % (data.get("result") or "claude CLI reported an error")})
+                yield chunk(finish_reason="stop")
+                yield b"data: [DONE]\n\n"
+                return
             tool_calls, content = parse_function_calls(data.get("result", ""), tool_names)
             if content:
                 yield chunk(delta={"content": content})
@@ -102,6 +107,10 @@ def openai_stream(model: Optional[str], prompt: str, system_prompt: Optional[str
         if kind == "text":
             yield chunk(delta={"content": ev["text"]})
         elif kind == "result":
+            if ev.get("is_error"):
+                yield chunk(delta={"content": "\n[service error] %s" % (ev.get("result") or "claude CLI reported an error")})
+                yield chunk(finish_reason="stop")
+                continue
             usage = usage_dict(ev.get("usage") or {}, ev.get("cost_usd"),
                                ev.get("session_id"))
             yield chunk(finish_reason="stop", usage=None if include_usage else usage)

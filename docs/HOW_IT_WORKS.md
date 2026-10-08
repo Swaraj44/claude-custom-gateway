@@ -1,4 +1,4 @@
-# How ClaudeBridge Works — The Process, Step by Step
+# How Claude Custom Gateway Works — The Process, Step by Step
 
 This document describes the exact process the service follows for every request, with worked examples at each stage. For setup instructions see the [README](../README.md).
 
@@ -22,7 +22,7 @@ This document describes the exact process the service follows for every request,
 
 ```
                  ┌────────────────────────────────────────────────────────┐
-                 │                    ClaudeBridge (FastAPI)              │
+                 │             Claude Custom Gateway (FastAPI)            │
                  │                                                        │
  client ──HTTP──▶│  auth ──▶ validate ──▶ transform ──▶ spawn CLI ──▶ ...  │
  client ◀─SSE───│                         (prompt /     claude -p        │
@@ -151,18 +151,20 @@ Step by step:
 
 OpenAI sends an array of `system` / `user` / `assistant` / `tool` messages. The CLI expects one prompt. So:
 
-- **`system` messages** are collected, joined, truncated to 100,000 chars, and later passed as `--system-prompt` (this *replaces* Claude Code's own agent system prompt).
-- **The remaining turns** are flattened into a `Role: text` transcript. A single turn is sent as-is; multiple turns become:
+- **`system` messages** are collected, joined, truncated to 100,000 chars, and later passed as `--system-prompt` (this *replaces* Claude Code's own agent system prompt). With no `system` message, a one-line default (`You are a helpful assistant.`) is passed instead — otherwise the CLI would fall back to its ~3k-token coding-agent prompt on every call.
+- **The remaining turns** become Anthropic content blocks, sent to the CLI as a stream-json user message: a fixed header block, then **one text block per turn** (`User: ...` / `Assistant: ...`), with any images right after their turn:
 
   ```
-  Conversation so far:
-  User: What is the weather in Tokyo?
-
-  Respond as the Assistant to the last message above.
+  [header]  Below is the conversation so far, one message per block. Continue as the Assistant ...
+  [block]   User: What is the weather in Tokyo?
+  [block]   Assistant: <tool_call name="get_weather">...</tool_call>
+  [block]   User: <tool_result name="get_weather">...</tool_result>
   ```
 
-- **`assistant` turns containing `tool_calls`** are rendered back into the `<function_calls>` XML format (see [the bridge](#the-function-calling-bridge)).
-- **`tool` result messages** are grouped into a single `User` turn wrapped in `<function_results>`. If that is the *last* turn, the closing instruction changes to tell the model to continue from the tool results.
+  The instruction lives in the leading header (not at the end), so request N's blocks are an exact prefix of request N+1's — see [prompt caching](#prompt-caching--verified-working-through-the-bridge). A plain single-turn request without `tools` is still sent as raw text; with `tools` (an agent loop) even the first turn uses blocks so it gets cached for the second.
+
+- **`assistant` turns containing `tool_calls`** are rendered back into the `<tool_call>` XML format (see [the bridge](#the-function-calling-bridge)).
+- **`tool` result messages** are grouped into a single `User` turn of `<tool_result name="...">` blocks.
 
 ### 2.2 Inject the tool definitions (`build_tools_section`)
 
@@ -171,27 +173,28 @@ When `tools` are present, a "Tool Use" section is appended to the system prompt.
 ```
 # Tool Use
 
-You can invoke functions by including a block like this in your reply:
+You can call functions by including blocks like this in your reply:
 
-<function_calls>
-<invoke name="function_name">
-<parameter name="parameter_name">value</parameter>
-</invoke>
-</function_calls>
+<tool_call name="function_name">
+<arg name="parameter_name">value</arg>
+</tool_call>
 
 Rules:
-- Parameter values: strings as plain text; numbers, booleans, arrays, and objects in JSON form.
-- To call several functions, include multiple <invoke> blocks inside one <function_calls> block.
+- Use exactly this <tool_call>/<arg> format for every call.
+- Argument values: strings as plain text; numbers, booleans, arrays, and objects in JSON form.
+- To call several functions, write several <tool_call> blocks one after another.
 - Put tool calls at the END of your reply, never inside code fences.
-- If no tool call is needed, reply normally without the block.
-- The result of each call will be provided to you as a <function_results> block in the next turn.
+- If no tool call is needed, reply normally without any <tool_call> block.
+- The results will be provided to you as <tool_result> blocks in the next turn.
 
 # Functions
 
 ## get_weather
 Get current weather for a city
-Parameters: {"type": "object", "properties": {"city": {"type": "string"}}, "required": ["city"]}
+Parameters: {"type":"object","properties":{"city":{"type":"string"}},"required":["city"]}
 ```
+
+**Why not Claude's native `<function_calls>`/`<invoke>` syntax?** When the model writes that syntax as plain text, the API treats it as a real tool call (`stop_reason: "tool_use"`). The CLI runs with no tools, so the call is unusable; the CLI retries once and then returns the literal text `The model's tool call could not be parsed (retry also failed).` as the reply. In testing this hit about half of Kilo Code-style agent requests on sonnet. The distinct `<tool_call>`/`<arg>` tags avoid it entirely (0 failures in 8 identical runs, and 4/4 multi-turn streaming agent sessions). As a safety net, if the CLI still returns that text, the gateway reruns the call once.
 
 ### 2.3 Spawn the CLI in raw-model mode
 
@@ -211,17 +214,15 @@ Suppose the CLI's `result` is:
 ```
 I'll check the weather for you.
 
-<function_calls>
-<invoke name="get_weather">
-<parameter name="city">Tokyo</parameter>
-</invoke>
-</function_calls>
+<tool_call name="get_weather">
+<arg name="city">Tokyo</arg>
+</tool_call>
 ```
 
 The parser extracts the block and converts it into OpenAI `tool_calls` (assigning a generated `call_...` id). The text before the block becomes the message `content`. It is deliberately forgiving:
 
-- unclosed `<function_calls>` blocks (truncated output)
-- missing opening tag (bare `<invoke>` blocks) — validated against the requested tool names so quoted examples in ordinary text are not misparsed
+- unclosed `<tool_call>` blocks (truncated output); an argument cut off mid-value is dropped rather than passed on half-written
+- the legacy `<function_calls>`/`<invoke>`/`<parameter>` syntax, including unclosed blocks and bare `<invoke>` blocks (validated against the requested tool names so quoted examples in ordinary text are not misparsed)
 - markdown code fences around blocks
 - non-string parameter values (`"42"` → `42`, `"true"` → `true`, arrays/objects parsed from JSON)
 
@@ -279,31 +280,22 @@ A full agent loop across the bridge, showing exactly what crosses the wire at ea
 }
 ```
 
-**What the service flattens this into** (sent to the CLI via stdin):
+**What the service flattens this into** (content blocks sent to the CLI via stdin as a stream-json user message; the last block carries the cache marker):
 
 ```
-Conversation so far:
-User: What is the weather in Tokyo?
-
-Assistant: <function_calls>
-<invoke name="get_weather">
-<parameter name="city">Tokyo</parameter>
-</invoke>
-</function_calls>
-
-User: <function_results>
-<result>
-<name>get_weather</name>
-<output>{"temperature": 18, "condition": "light rain"}</output>
-</result>
-</function_results>
-
-Continue as the Assistant: use the tool results above to proceed. Either make the next tool calls or give your final answer.
+[text] Below is the conversation so far, one message per block. Continue as the Assistant by responding to the last message. If it contains tool results, use them to proceed: either make the next tool calls or give your final answer.
+[text] User: What is the weather in Tokyo?
+[text] Assistant: <tool_call name="get_weather">
+       <arg name="city">Tokyo</arg>
+       </tool_call>
+[text] User: <tool_result name="get_weather">
+       {"temperature": 18, "condition": "light rain"}
+       </tool_result>          ← cache_control: {"type": "ephemeral", "ttl": "1h"}
 ```
 
 **Turn 3 — the model answers without another call**, so the parser finds no XML block, `finish_reason` is `"stop"`, and the plain text is returned as `content` — a normal chat completion.
 
-Parallel calls (multiple `<invoke>` blocks in one reply) come back as multiple `tool_calls` entries, all with `finish_reason: "tool_calls"`.
+Parallel calls (multiple `<tool_call>` blocks in one reply) come back as multiple `tool_calls` entries, all with `finish_reason: "tool_calls"`.
 
 ---
 
@@ -345,10 +337,18 @@ Event mapping (`app/claude_cli.py:claude_events` → `app/apis/chat.py` / `app/o
 
 ### Prompt caching — verified working through the bridge
 
-The `claude` CLI marks cache breakpoints on its internal API calls even in one-shot `-p` mode, and the bridge keeps the flattened prompt **append-only** (turns 1..N stay byte-identical when turn N+1 is appended) and the system prompt byte-stable across turns — so consecutive requests within Anthropic's ~5-minute cache TTL **do hit the cache**. Verified live (Claude Code 2.1.267, sonnet, ~6.5k-token system prefix):
+The `claude` CLI puts cache breakpoints on the system prompt but **not** on the user message, so on its own only the system prompt is reused — the conversation history would be re-written to cache (at 1.25–2× input price) on every turn. The bridge fixes this:
 
-- Request 1 (first turn): `cache_creation_input_tokens: 6474` — prefix written to cache
-- Request 2 (same prefix + one more turn, seconds later): `cache_read_input_tokens: 6031`, `cache_creation_input_tokens: 497` — ~92% of the input served from cache
+1. The conversation is sent as one content block per turn behind a fixed header (see [2.1](#21-flatten-messages-into-a-transcript-messages_to_prompt)), so each request is a block-for-block prefix of the next.
+2. The last block carries `cache_control: {"type": "ephemeral", "ttl": "1h"}` (`CLAUDE_SERVICE_PROMPT_CACHE_TTL`). The TTL must match the CLI's own breakpoints (`1h` on subscription logins), because a `1h` breakpoint may not follow a `5m` one.
+3. The CLI is run with a clean environment: variables inherited from a parent Claude Code session (which would add a per-call scratchpad path to every prompt) are dropped, and `CLAUDE.md` / auto-memory are disabled for `/v1` calls.
+
+Verified live (Claude Code 2.1.267, sonnet, ~17k-token system prompt + tools, 11k-token first user message):
+
+| | cache write | cache read | cost |
+|---|---|---|---|
+| Turn 2, before | 11,186 | 17,108 (system only) | $0.060 |
+| Turn 2, after | 408 | 27,767 (system + history) | $0.019 |
 
 The `/v1` response `usage` block surfaces this (non-streaming and streaming, final chunk):
 
@@ -363,7 +363,7 @@ The `/v1` response `usage` block surfaces this (non-streaming and streaming, fin
 }
 ```
 
-`prompt_tokens_details.cached_tokens` is the standard OpenAI field (tools that display cached tokens will show it); the `cache_*_input_tokens` fields are Anthropic's raw names. Fields are omitted when zero. Cache expires after ~5 minutes of inactivity, so long thinking gaps between agent turns fall back to full-price input.
+`prompt_tokens_details.cached_tokens` is the standard OpenAI field (tools that display cached tokens will show it); the `cache_*_input_tokens` fields are Anthropic's raw names. Fields are omitted when zero. With the default `1h` TTL, a conversation stays cached for an hour of inactivity.
 
 ---
 

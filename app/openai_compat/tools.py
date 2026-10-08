@@ -1,4 +1,11 @@
-"""Function-calling bridge: parse and render Claude's XML tool-call format."""
+"""Function-calling bridge: parse and render the XML tool-call format.
+
+The model is taught <tool_call>/<arg> tags rather than Claude's native
+<function_calls>/<invoke> syntax: the API treats native-looking calls in plain
+text as real tool use, and since the CLI runs with no tools the call is then
+dropped ("The model's tool call could not be parsed"). The native syntax is
+still parsed as a fallback.
+"""
 
 import html
 import json
@@ -6,6 +13,12 @@ import re
 import uuid
 from typing import Any, List, Optional
 
+TOOL_CALL_RE = re.compile(r'<tool_call\s+name="([^"]+)"\s*>(.*?)</tool_call>', re.DOTALL)
+TOOL_CALL_OPEN_RE = re.compile(r'<tool_call\s+name="([^"]+)"\s*>')
+ARG_RE = re.compile(r'<arg\s+name="([^"]+)"\s*>(.*?)</arg>', re.DOTALL)
+ARG_OPEN_RE = re.compile(r'<arg\s+name="([^"]+)"\s*>')
+
+# Legacy (native-looking) format, accepted when the model falls back to it.
 FUNCTION_CALLS_BLOCK_RE = re.compile(r"<function_calls>(.*?)</function_calls>", re.DOTALL)
 INVOKE_RE = re.compile(r'<invoke\s+name="([^"]+)"\s*>(.*?)</invoke>', re.DOTALL)
 INVOKE_OPEN_RE = re.compile(r'<invoke\s+name="([^"]+)"\s*>')
@@ -24,7 +37,7 @@ def param_value_to_xml(v) -> str:
 
 
 def render_tool_calls_xml(tool_calls: List[dict]) -> str:
-    invokes = []
+    calls = []
     for tc in tool_calls:
         fn = tc.get("function") or {}
         name = fn.get("name") or ""
@@ -38,12 +51,12 @@ def render_tool_calls_xml(tool_calls: List[dict]) -> str:
             params = raw_args
         else:
             params = {}
-        params_xml = "\n".join(
-            '<parameter name="%s">%s</parameter>' % (k, param_value_to_xml(v))
+        args_xml = "".join(
+            '<arg name="%s">%s</arg>\n' % (k, param_value_to_xml(v))
             for k, v in params.items()
         )
-        invokes.append('<invoke name="%s">\n%s\n</invoke>' % (name, params_xml))
-    return "<function_calls>\n%s\n</function_calls>" % "\n".join(invokes)
+        calls.append('<tool_call name="%s">\n%s</tool_call>' % (name, args_xml))
+    return "\n".join(calls)
 
 
 def coerce_param_value(raw: str):
@@ -74,16 +87,16 @@ def strip_code_fences(content: str) -> str:
     return content.strip()
 
 
-def build_tool_call(name: str, body: str) -> Optional[dict]:
+def build_tool_call(name: str, body: str, param_re=PARAM_RE, param_open_re=PARAM_OPEN_RE) -> Optional[dict]:
     if not name:
         return None
     params = {}
-    for p in PARAM_RE.finditer(body):
+    for p in param_re.finditer(body):
         params[p.group(1).strip()] = coerce_param_value(html.unescape(p.group(2).strip()))
     if not params:
-        for p in PARAM_OPEN_RE.finditer(body):
+        for p in param_open_re.finditer(body):
             fragment = body[p.end():]
-            nxt = PARAM_OPEN_RE.search(fragment)
+            nxt = param_open_re.search(fragment)
             if nxt:
                 fragment = fragment[: nxt.start()]
             params[p.group(1).strip()] = coerce_param_value(html.unescape(fragment.strip()))
@@ -92,6 +105,25 @@ def build_tool_call(name: str, body: str) -> Optional[dict]:
         "type": "function",
         "function": {"name": name, "arguments": json.dumps(params, ensure_ascii=False)},
     }
+
+
+def parse_tool_call_tags(text: str):
+    """Parse <tool_call> blocks; returns (calls, start, end) spanning all of them."""
+    matches = list(TOOL_CALL_RE.finditer(text))
+    if matches:
+        calls = [build_tool_call(m.group(1).strip(), m.group(2), ARG_RE, ARG_OPEN_RE) for m in matches]
+        return [c for c in calls if c], matches[0].start(), matches[-1].end()
+    # Truncated reply: an opening tag with no closing tag.
+    opens = list(TOOL_CALL_OPEN_RE.finditer(text))
+    calls = []
+    for i, m in enumerate(opens):
+        body = text[m.end(): opens[i + 1].start() if i + 1 < len(opens) else len(text)]
+        call = build_tool_call(m.group(1).strip(), body, ARG_RE, ARG_OPEN_RE)
+        if call:
+            calls.append(call)
+    if calls:
+        return calls, opens[0].start(), len(text)
+    return [], 0, 0
 
 
 def parse_invokes(block: str) -> List[dict]:
@@ -120,6 +152,11 @@ def parse_function_calls(text: str, known_names: Optional[set] = None):
         if known_names:
             return [c for c in calls if c["function"]["name"] in known_names]
         return calls
+
+    calls, start, end = parse_tool_call_tags(text)
+    calls = valid(calls)
+    if calls:
+        return calls, strip_code_fences(text[:start] + text[end:])
 
     blocks = list(FUNCTION_CALLS_BLOCK_RE.finditer(text))
     if blocks:
@@ -160,20 +197,19 @@ def build_tools_section(tools: List[dict], tool_choice: Optional[Any] = None) ->
     lines = [
         "# Tool Use",
         "",
-        "You can invoke functions by including a block like this in your reply:",
+        "You can call functions by including blocks like this in your reply:",
         "",
-        "<function_calls>",
-        '<invoke name="function_name">',
-        '<parameter name="parameter_name">value</parameter>',
-        "</invoke>",
-        "</function_calls>",
+        '<tool_call name="function_name">',
+        '<arg name="parameter_name">value</arg>',
+        "</tool_call>",
         "",
         "Rules:",
-        "- Parameter values: strings as plain text; numbers, booleans, arrays, and objects in JSON form.",
-        "- To call several functions, include multiple <invoke> blocks inside one <function_calls> block.",
+        "- Use exactly this <tool_call>/<arg> format for every call.",
+        "- Argument values: strings as plain text; numbers, booleans, arrays, and objects in JSON form.",
+        "- To call several functions, write several <tool_call> blocks one after another.",
         "- Put tool calls at the END of your reply, never inside code fences.",
-        "- If no tool call is needed, reply normally without the block.",
-        "- The result of each call will be provided to you as a <function_results> block in the next turn.",
+        "- If no tool call is needed, reply normally without any <tool_call> block.",
+        "- The results will be provided to you as <tool_result> blocks in the next turn.",
         "",
         "# Functions",
         "",
@@ -186,7 +222,7 @@ def build_tools_section(tools: List[dict], tool_choice: Optional[Any] = None) ->
         lines.append("## %s" % name)
         if desc:
             lines.append(desc)
-        lines.append("Parameters: %s" % json.dumps(schema, ensure_ascii=False))
+        lines.append("Parameters: %s" % json.dumps(schema, ensure_ascii=False, separators=(",", ":")))
         lines.append("")
     if tool_choice:
         if isinstance(tool_choice, str) and tool_choice == "required":

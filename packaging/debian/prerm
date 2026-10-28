@@ -1,0 +1,8 @@
+#!/bin/sh
+set -e
+if [ "$1" = "remove" ] || [ "$1" = "purge" ]; then
+    for unit in $(systemctl list-units --plain --no-legend 'claude-custom-gateway@*.service' 2>/dev/null | awk '{print $1}'); do
+        systemctl stop "$unit" || true
+    done
+fi
+exit 0

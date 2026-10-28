@@ -1,0 +1,16 @@
+#!/bin/sh
+set -e
+APP=/opt/claude-custom-gateway
+if [ "$1" = "configure" ]; then
+    rm -rf "$APP/venv"
+    python3 -m venv "$APP/venv"
+    # Prefer the bundled wheels (offline); fall back to PyPI if they don't match this Python.
+    if ! "$APP/venv/bin/pip" install --quiet --no-index --find-links "$APP/wheels" claude-custom-gateway; then
+        echo "Bundled wheels did not match this Python; installing from PyPI..."
+        "$APP/venv/bin/pip" install --quiet --find-links "$APP/wheels" claude-custom-gateway
+    fi
+    echo
+    echo "Claude Custom Gateway installed. Edit /etc/default/claude-custom-gateway, then run:"
+    echo "  sudo systemctl enable --now claude-custom-gateway@<your-username>"
+fi
+exit 0

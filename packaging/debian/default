@@ -1,0 +1,13 @@
+# Settings for the Claude Custom Gateway service (KEY=value, no "export").
+# After editing:  sudo systemctl restart claude-custom-gateway@<user>
+#
+# Bind address. Use 127.0.0.1 to accept local connections only.
+CLAUDE_SERVICE_HOST=0.0.0.0
+CLAUDE_SERVICE_PORT=6069
+CLAUDE_SERVICE_TIMEOUT=600
+# CHANGE THIS before exposing the service to a network.
+CLAUDE_SERVICE_API_KEY=change-me
+CLAUDE_SERVICE_VISION_MODEL=sonnet
+CLAUDE_SERVICE_PROMPT_CACHE_TTL=1h
+# CLAUDE_SERVICE_EFFORT=low
+# CLAUDE_SERVICE_LOG_PAYLOADS=0

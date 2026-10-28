@@ -1,0 +1,17 @@
+[Unit]
+Description=Claude Custom Gateway (running as user %i)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=%i
+# HOME is set by systemd from User=; the claude CLI uses ~/.claude for its login.
+Environment=PATH=/home/%i/.local/bin:/usr/local/bin:/usr/bin:/bin
+EnvironmentFile=-/etc/default/claude-custom-gateway
+ExecStart=/usr/bin/claude-custom-gateway
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

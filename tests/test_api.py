@@ -22,7 +22,7 @@ def test_health_open():
 def test_index_served():
     r = client.get("/")
     assert r.status_code == 200
-    assert "ClaudeBridge" in r.text
+    assert "Claude Custom Gateway" in r.text
     assert "text/html" in r.headers["content-type"]
 
 

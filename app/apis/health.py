@@ -2,11 +2,16 @@
 
 from fastapi import APIRouter
 
-from app.config import settings
+from pathlib import Path
+
+from fastapi import APIRouter
+
+from app.config import claude_bin, settings
 
 router = APIRouter()
 
 
 @router.get("/health")
 def health():
-    return {"status": "ok", "claude_cli": settings.claude_bin, "timeout_s": settings.timeout}
+    bin_path = claude_bin()
+    return {"status": "ok", "claude_cli": bin_path, "claude_cli_ok": Path(bin_path).is_file(), "timeout_s": settings.timeout}

@@ -58,7 +58,7 @@ Key properties of this design:
 
 Every request to a protected endpoint passes through:
 
-1. **API-key check** (`app/security.py`) — reads `Authorization: Bearer <key>` or `x-api-key`; compared against `CLAUDE_SERVICE_API_KEY` (default `swaraj`, empty = auth disabled). Failure → `401`.
+1. **API-key check** (`app/security.py`) — reads `Authorization: Bearer <key>` or `x-api-key`; compared against `CLAUDE_SERVICE_API_KEY` from `.env` (empty = auth disabled). Failure → `401`.
 2. **Body validation** — Pydantic models (`app/schemas.py`) validate the JSON body. Failure → `400`, formatted as `{"error": ...}` (native) or OpenAI-style `{"error": {"message": ...}}` (`/v1/*`).
 3. **CLI discovery** (once, at startup — `app/config.py`) — `shutil.which("claude")`, with fallbacks for `~/.local/bin/claude` and Windows npm paths.
 
@@ -71,7 +71,7 @@ The simplest path. Example request:
 ```bash
 curl -X POST http://127.0.0.1:8000/api/chat \
   -H "Content-Type: application/json" \
-  -H "Authorization: Bearer swaraj" \
+  -H "Authorization: Bearer your-api-key" \
   -d '{"prompt": "Explain recursion in one sentence"}'
 ```
 
@@ -123,7 +123,7 @@ This is where most of the transformation work happens. Example request with tool
 ```bash
 curl -X POST http://127.0.0.1:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -H "Authorization: Bearer swaraj" \
+  -H "Authorization: Bearer your-api-key" \
   -d '{
     "model": "sonnet",
     "messages": [
@@ -151,7 +151,7 @@ Step by step:
 
 OpenAI sends an array of `system` / `user` / `assistant` / `tool` messages. The CLI expects one prompt. So:
 
-- **`system` messages** are collected, joined, truncated to 100,000 chars, and later passed as `--system-prompt` (this *replaces* Claude Code's own agent system prompt). With no `system` message, a one-line default (`You are a helpful assistant.`) is passed instead — otherwise the CLI would fall back to its ~3k-token coding-agent prompt on every call.
+- **`system` messages** are collected, joined, truncated to 100,000 chars, and later written to a temp file passed as `--system-prompt-file` (this *replaces* Claude Code's own agent system prompt). A file rather than an argument, because agent system prompts often exceed Windows' 32,767-char command-line limit, which fails the spawn with WinError 206. With no `system` message, a one-line default (`You are a helpful assistant.`) is passed instead — otherwise the CLI would fall back to its ~3k-token coding-agent prompt on every call.
 - **The remaining turns** become Anthropic content blocks, sent to the CLI as a stream-json user message: a fixed header block, then **one text block per turn** (`User: ...` / `Assistant: ...`), with any images right after their turn:
 
   ```
@@ -201,7 +201,7 @@ Parameters: {"type":"object","properties":{"city":{"type":"string"}},"required":
 ```bash
 claude -p --output-format json \
   --tools "" --strict-mcp-config \
-  --system-prompt "You are a concise assistant.\n\n# Tool Use\n..." \
+  --system-prompt-file /tmp/claude-gw-system-XXXX.txt \   # "You are a concise assistant.\n\n# Tool Use\n..."
   --model sonnet
 ```
 

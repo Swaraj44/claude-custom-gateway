@@ -38,11 +38,11 @@ def test_tool_calls_and_results_continuation():
         ]),
         OpenAIMessage(role="tool", tool_call_id="call_1", content="18C"),
     ])
-    assert "<function_calls>" in prompt
-    assert '<invoke name="get_weather">' in prompt
-    assert "<function_results>" in prompt
-    assert "<name>get_weather</name>" in prompt
-    assert "Continue as the Assistant" in prompt
+    assert '<tool_call name="get_weather">' in prompt
+    assert '<arg name="city">Tokyo</arg>' in prompt
+    assert '<tool_result name="get_weather">' in prompt
+    assert "18C" in prompt
+    assert "Continue as the Assistant: use the tool results above" in prompt
 
 
 def _img_msg(text, data="aGVsbG8=", media="image/png"):
@@ -78,11 +78,11 @@ def test_multi_turn_with_images_interleaved():
         _img_msg("And this?"),
     ])
     types = [b["type"] for b in blocks]
-    assert types == ["text", "text", "text", "image", "text"]
-    assert blocks[0]["text"] == "User: Hi"
-    assert blocks[1]["text"] == "Assistant: Hello!"
-    assert blocks[2]["text"] == "User: And this?"
-    assert blocks[4]["text"].startswith("Respond as the Assistant")
+    assert types == ["text", "text", "text", "text", "image"]
+    assert blocks[0]["text"].startswith("Below is the conversation so far")
+    assert blocks[1]["text"] == "User: Hi"
+    assert blocks[2]["text"] == "Assistant: Hello!"
+    assert blocks[3]["text"] == "User: And this?"
 
 
 def test_image_only_message():

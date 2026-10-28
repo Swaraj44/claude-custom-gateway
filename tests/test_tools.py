@@ -51,7 +51,8 @@ def test_render_and_parse_round_trip():
         "function": {"name": "get_weather", "arguments": json.dumps({"city": "Tokyo", "units": "metric"})},
     }]
     xml = render_tool_calls_xml(tool_calls)
-    assert '<invoke name="get_weather">' in xml
+    assert '<tool_call name="get_weather">' in xml
+    assert '<arg name="city">Tokyo</arg>' in xml
     calls, _ = parse_function_calls(xml, {"get_weather"})
     assert json.loads(calls[0]["function"]["arguments"]) == {"city": "Tokyo", "units": "metric"}
 

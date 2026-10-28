@@ -6,18 +6,15 @@ import tempfile
 import threading
 from typing import Dict, List, Optional
 
-from app.config import settings
+from app.config import reset_claude_bin, claude_bin, settings
 from app.utils import error
-
-
-DEFAULT_RAW_SYSTEM_PROMPT = "You are a helpful assistant."
 
 
 def build_cmd(model: Optional[str] = None, session_id: Optional[str] = None,
               stream: bool = False, system_prompt: Optional[str] = None,
               raw_model: bool = False, stream_input: bool = False) -> List[str]:
     output_format = "stream-json" if (stream or stream_input) else "json"
-    cmd = [settings.claude_bin, "-p", "--output-format", output_format]
+    cmd = [claude_bin(), "-p", "--output-format", output_format]
     if stream or stream_input:
         cmd.append("--verbose")
     if stream_input:
@@ -30,14 +27,39 @@ def build_cmd(model: Optional[str] = None, session_id: Optional[str] = None,
             cmd += ["--effort", settings.effort]
         # Without --system-prompt the CLI sends its full coding-agent prompt
         # (~3k tokens), which a plain chat request neither wants nor pays for.
-        system_prompt = system_prompt or DEFAULT_RAW_SYSTEM_PROMPT
+        system_prompt = system_prompt or settings.default_system_prompt
     if system_prompt:
-        cmd += ["--system-prompt", system_prompt]
+        # Passed as a file, not an argument: agent system prompts (Kilo Code etc.)
+        # run to tens of thousands of characters, past Windows' 32,767-char
+        # command-line limit, where spawning fails with WinError 206 — raised
+        # as FileNotFoundError and previously reported as "claude CLI not found".
+        cmd += ["--system-prompt-file", write_system_prompt_file(system_prompt)]
     if model:
         cmd += ["--model", model]
     if session_id:
         cmd += ["--resume", session_id]
     return cmd
+
+
+def write_system_prompt_file(system_prompt: str) -> str:
+    fd, path = tempfile.mkstemp(prefix="claude-gw-system-", suffix=".txt")
+    with os.fdopen(fd, "w", encoding="utf-8", newline="") as f:
+        f.write(system_prompt)
+    return path
+
+
+def remove_cmd_files(cmd: List[str]) -> None:
+    if "--system-prompt-file" in cmd:
+        try:
+            os.remove(cmd[cmd.index("--system-prompt-file") + 1])
+        except OSError:
+            pass
+
+
+def spawn_error(exc: OSError) -> str:
+    if getattr(exc, "winerror", None) == 206:
+        return "claude CLI command line too long (WinError 206)"
+    return "claude CLI not found at '%s'" % claude_bin()
 
 
 # Set when the gateway is started from inside a Claude Code session. Inherited,
@@ -65,7 +87,10 @@ def cli_env(raw_model: bool = False) -> Dict[str, str]:
 def kill_process(proc: subprocess.Popen) -> None:
     if proc.poll() is None:
         try:
-            os.killpg(proc.pid, signal.SIGKILL)
+            if os.name == "posix":
+                os.killpg(proc.pid, signal.SIGKILL)
+            else:
+                proc.kill()
         except (ProcessLookupError, PermissionError, OSError):
             try:
                 proc.kill()
@@ -109,9 +134,9 @@ def _run_claude_once(prompt: str, model: Optional[str], session_id: Optional[str
     stream_input = content_blocks is not None
     cmd = build_cmd(model, session_id, stream=stream_input, system_prompt=system_prompt,
                     raw_model=raw_model, stream_input=stream_input)
-    try:
-        proc = subprocess.run(
-            cmd,
+    def run(c):
+        return subprocess.run(
+            c,
             input=stdin_payload(prompt, content_blocks),
             capture_output=True,
             text=True,
@@ -119,10 +144,23 @@ def _run_claude_once(prompt: str, model: Optional[str], session_id: Optional[str
             timeout=settings.timeout,
             env=cli_env(raw_model),
         )
-    except FileNotFoundError:
-        return None, error(500, "claude CLI not found at '%s'" % settings.claude_bin)
+
+    try:
+        try:
+            proc = run(cmd)
+        except FileNotFoundError as e:
+            if getattr(e, "winerror", None) == 206:
+                raise
+            # The cached CLI path can vanish mid-run (auto-updater replaces the exe);
+            # re-discover and retry once before giving up.
+            reset_claude_bin()
+            proc = run([claude_bin()] + cmd[1:])
+    except FileNotFoundError as e:
+        return None, error(500, spawn_error(e))
     except subprocess.TimeoutExpired:
         return None, error(504, "claude CLI timed out after %ds" % settings.timeout)
+    finally:
+        remove_cmd_files(cmd)
     if not stream_input:
         if proc.returncode != 0:
             err = (proc.stderr or "").strip()
@@ -159,20 +197,31 @@ def claude_events(prompt: str, model: Optional[str] = None, session_id: Optional
     cmd = build_cmd(model, session_id, stream=True, system_prompt=system_prompt,
                     raw_model=raw_model, stream_input=stream_input)
     stderr_file = tempfile.TemporaryFile(mode="w+", encoding="utf-8")
-    try:
-        proc = subprocess.Popen(
-            cmd,
+
+    def spawn(c):
+        return subprocess.Popen(
+            c,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=stderr_file,
             text=True,
             encoding="utf-8",
-            start_new_session=True,
+            start_new_session=(os.name == "posix"),
             env=cli_env(raw_model),
         )
-    except FileNotFoundError:
+
+    try:
+        try:
+            proc = spawn(cmd)
+        except FileNotFoundError as e:
+            if getattr(e, "winerror", None) == 206:
+                raise
+            reset_claude_bin()
+            proc = spawn([claude_bin()] + cmd[1:])
+    except FileNotFoundError as e:
         stderr_file.close()
-        yield {"kind": "error", "message": "claude CLI not found at '%s'" % settings.claude_bin}
+        remove_cmd_files(cmd)
+        yield {"kind": "error", "message": spawn_error(e)}
         return
 
     def feed_stdin():
@@ -227,3 +276,4 @@ def claude_events(prompt: str, model: Optional[str] = None, session_id: Optional
         except subprocess.TimeoutExpired:
             pass
         stderr_file.close()
+        remove_cmd_files(cmd)

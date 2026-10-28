@@ -178,7 +178,7 @@
         <option value="opus">Opus</option>
         <option value="haiku">Haiku</option>
       </select>
-      <input id="apikey" placeholder="API key" value="swaraj">
+      <input id="apikey" type="password" placeholder="API key" autocomplete="off">
       <input id="session" value="session: none" readonly>
     </div>
     <div class="btns">
@@ -237,6 +237,34 @@ function appendText(text, cls) {
   }
   scrollChat();
 }
+
+// The key is never baked into the page: the user types the value of CLAUDE_SERVICE_API_KEY once and this browser remembers it.
+const apiKeyEl = document.getElementById('apikey');
+try { apiKeyEl.value = localStorage.getItem('claudeGatewayApiKey') || ''; } catch (e) {}
+apiKeyEl.addEventListener('change', () => {
+  try { localStorage.setItem('claudeGatewayApiKey', apiKeyEl.value.trim()); } catch (e) {}
+  loadModels();
+});
+
+// Fill the model picker from CLAUDE_SERVICE_MODELS via /v1/models.
+async function loadModels() {
+  const select = document.getElementById('model');
+  try {
+    const res = await fetch('/v1/models', { headers: { 'X-API-Key': apiKeyEl.value.trim() } });
+    if (!res.ok) return;
+    const ids = (await res.json()).data.map(m => m.id);
+    const current = select.value;
+    select.length = 1;  // keep "Default model"
+    for (const id of ids) {
+      const opt = document.createElement('option');
+      opt.value = id;
+      opt.textContent = id.charAt(0).toUpperCase() + id.slice(1);
+      select.appendChild(opt);
+    }
+    select.value = ids.includes(current) ? current : '';
+  } catch (e) {}
+}
+loadModels();
 
 document.getElementById('prompt').addEventListener('keydown', e => {
   if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') send();

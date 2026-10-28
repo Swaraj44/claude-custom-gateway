@@ -1,5 +1,6 @@
 import shutil
 import sys
+from pathlib import Path
 
 import uvicorn
 from fastapi import FastAPI, Request
@@ -9,7 +10,7 @@ from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app import __version__
-from app.config import settings
+from app.config import claude_bin, settings
 from app.apis import api_router
 from app import payload_logging
 from app.payload_logging import PayloadLoggingMiddleware
@@ -19,7 +20,7 @@ def create_app() -> FastAPI:
     app = FastAPI(title="Claude Custom Gateway", version=__version__)
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],
+        allow_origins=list(settings.cors_origins),
         allow_methods=["*"],
         allow_headers=["*"],
     )
@@ -50,7 +51,7 @@ app = create_app()
 
 
 def main() -> None:
-    if shutil.which("claude") is None:
+    if not Path(claude_bin()).is_file() and shutil.which(claude_bin()) is None:
         print("warning: 'claude' CLI not found on PATH; requests will fail until it is available", file=sys.stderr)
     print("Claude Custom Gateway (FastAPI) running")
     print("  Web UI:    http://%s:%d/" % (settings.host, settings.port))
@@ -66,10 +67,13 @@ def main() -> None:
     print("  Payloads:  %s" % ("logging requests/responses" if payload_logging.enabled else "not logged"))
     if settings.api_key:
         print("  Auth:      API key required (CLAUDE_SERVICE_API_KEY is set)")
+    else:
+        print("warning: CLAUDE_SERVICE_API_KEY is empty, so /api/* and /v1/* accept requests without a key;"
+              " set it in .env (see .env.example)", file=sys.stderr)
     print("  Claude:    %s | timeout: %ds | models: %s"
-          % (settings.claude_bin, settings.timeout, ", ".join(settings.models)))
+          % (claude_bin(), settings.timeout, ", ".join(settings.models)))
     print("Press Ctrl+C to stop")
-    uvicorn.run(app, host=settings.host, port=settings.port, log_level="info")
+    uvicorn.run(app, host=settings.host, port=settings.port, log_level=settings.log_level)
 
 
 def main_pro() -> None:

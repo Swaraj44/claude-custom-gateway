@@ -24,7 +24,7 @@ Build on the same Ubuntu release you deploy to.
 ## 2. Install
 
 ```bash
-sudo apt install ./dist/claude-custom-gateway_1.4.0_amd64.deb
+sudo apt install ./dist/claude-custom-gateway_1.4.1_amd64.deb
 ```
 
 `apt` pulls in `python3-venv` and `python3-pip` automatically. The install creates a virtualenv in

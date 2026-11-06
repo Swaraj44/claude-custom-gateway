@@ -4,7 +4,8 @@ import signal
 import subprocess
 import tempfile
 import threading
-from typing import Dict, List, Optional
+from contextlib import contextmanager
+from typing import Dict, Iterator, List, Optional, Tuple
 
 from app.config import settings
 from app.utils import error
@@ -12,10 +13,34 @@ from app.utils import error
 
 DEFAULT_RAW_SYSTEM_PROMPT = "You are a helpful assistant."
 
+# Linux caps a single argv string at 128 KiB (MAX_ARG_STRLEN), and agent
+# clients send system prompts plus tool schemas well past that. Anything over
+# this size goes to the CLI through --system-prompt-file instead of argv.
+SYSTEM_PROMPT_INLINE_MAX = 32 * 1024
+
+
+@contextmanager
+def spilled_system_prompt(system_prompt: Optional[str]) -> Iterator[Tuple[Optional[str], Optional[str]]]:
+    """Yield (inline_prompt, file_path): small prompts stay inline, large ones go to a temp file."""
+    if not system_prompt or len(system_prompt.encode("utf-8")) <= SYSTEM_PROMPT_INLINE_MAX:
+        yield system_prompt, None
+        return
+    fd, path = tempfile.mkstemp(prefix="claude-gateway-system-", suffix=".txt")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(system_prompt)
+        yield None, path
+    finally:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+
 
 def build_cmd(model: Optional[str] = None, session_id: Optional[str] = None,
               stream: bool = False, system_prompt: Optional[str] = None,
-              raw_model: bool = False, stream_input: bool = False) -> List[str]:
+              raw_model: bool = False, stream_input: bool = False,
+              system_prompt_file: Optional[str] = None) -> List[str]:
     output_format = "stream-json" if (stream or stream_input) else "json"
     cmd = [settings.claude_bin, "-p", "--output-format", output_format]
     if stream or stream_input:
@@ -30,8 +55,11 @@ def build_cmd(model: Optional[str] = None, session_id: Optional[str] = None,
             cmd += ["--effort", settings.effort]
         # Without --system-prompt the CLI sends its full coding-agent prompt
         # (~3k tokens), which a plain chat request neither wants nor pays for.
-        system_prompt = system_prompt or DEFAULT_RAW_SYSTEM_PROMPT
-    if system_prompt:
+        if not system_prompt_file:
+            system_prompt = system_prompt or DEFAULT_RAW_SYSTEM_PROMPT
+    if system_prompt_file:
+        cmd += ["--system-prompt-file", system_prompt_file]
+    elif system_prompt:
         cmd += ["--system-prompt", system_prompt]
     if model:
         cmd += ["--model", model]
@@ -106,9 +134,24 @@ def run_claude_once(prompt: str, model: Optional[str] = None, session_id: Option
 def _run_claude_once(prompt: str, model: Optional[str], session_id: Optional[str],
                      system_prompt: Optional[str], raw_model: bool,
                      content_blocks: Optional[List[dict]]):
+    with spilled_system_prompt(system_prompt) as (inline_prompt, prompt_file):
+        return _spawn_once(prompt, model, session_id, inline_prompt, prompt_file,
+                           raw_model, content_blocks)
+
+
+def _start_error(exc: OSError) -> str:
+    if isinstance(exc, FileNotFoundError):
+        return "claude CLI not found at '%s'" % settings.claude_bin
+    return "could not start claude CLI: %s" % exc
+
+
+def _spawn_once(prompt: str, model: Optional[str], session_id: Optional[str],
+                system_prompt: Optional[str], system_prompt_file: Optional[str],
+                raw_model: bool, content_blocks: Optional[List[dict]]):
     stream_input = content_blocks is not None
     cmd = build_cmd(model, session_id, stream=stream_input, system_prompt=system_prompt,
-                    raw_model=raw_model, stream_input=stream_input)
+                    raw_model=raw_model, stream_input=stream_input,
+                    system_prompt_file=system_prompt_file)
     try:
         proc = subprocess.run(
             cmd,
@@ -119,8 +162,8 @@ def _run_claude_once(prompt: str, model: Optional[str], session_id: Optional[str
             timeout=settings.timeout,
             env=cli_env(raw_model),
         )
-    except FileNotFoundError:
-        return None, error(500, "claude CLI not found at '%s'" % settings.claude_bin)
+    except OSError as exc:
+        return None, error(500, _start_error(exc))
     except subprocess.TimeoutExpired:
         return None, error(504, "claude CLI timed out after %ds" % settings.timeout)
     if not stream_input:
@@ -155,9 +198,20 @@ def _run_claude_once(prompt: str, model: Optional[str], session_id: Optional[str
 def claude_events(prompt: str, model: Optional[str] = None, session_id: Optional[str] = None,
                   system_prompt: Optional[str] = None, raw_model: bool = False,
                   content_blocks: Optional[List[dict]] = None):
+    # The temp file (if any) must outlive the CLI process, so it is removed
+    # only when this generator finishes or is closed.
+    with spilled_system_prompt(system_prompt) as (inline_prompt, prompt_file):
+        yield from _stream_events(prompt, model, session_id, inline_prompt, prompt_file,
+                                  raw_model, content_blocks)
+
+
+def _stream_events(prompt: str, model: Optional[str], session_id: Optional[str],
+                   system_prompt: Optional[str], system_prompt_file: Optional[str],
+                   raw_model: bool, content_blocks: Optional[List[dict]]):
     stream_input = content_blocks is not None
     cmd = build_cmd(model, session_id, stream=True, system_prompt=system_prompt,
-                    raw_model=raw_model, stream_input=stream_input)
+                    raw_model=raw_model, stream_input=stream_input,
+                    system_prompt_file=system_prompt_file)
     stderr_file = tempfile.TemporaryFile(mode="w+", encoding="utf-8")
     try:
         proc = subprocess.Popen(
@@ -170,9 +224,9 @@ def claude_events(prompt: str, model: Optional[str] = None, session_id: Optional
             start_new_session=True,
             env=cli_env(raw_model),
         )
-    except FileNotFoundError:
+    except OSError as exc:
         stderr_file.close()
-        yield {"kind": "error", "message": "claude CLI not found at '%s'" % settings.claude_bin}
+        yield {"kind": "error", "message": _start_error(exc)}
         return
 
     def feed_stdin():

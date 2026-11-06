@@ -24,7 +24,7 @@ Build on the same Ubuntu release you deploy to.
 ## 2. Install
 
 ```bash
-sudo apt install ./dist/claude-custom-gateway_1.3.0_amd64.deb
+sudo apt install ./dist/claude-custom-gateway_1.4.0_amd64.deb
 ```
 
 `apt` pulls in `python3-venv` and `python3-pip` automatically. The install creates a virtualenv in
@@ -69,9 +69,15 @@ After changing the config: `sudo systemctl restart claude-custom-gateway@$USER`.
 
 ## Troubleshooting
 
-- **Requests fail with "claude not found"**: the CLI must be in `~/.local/bin`, `/usr/local/bin` or
-  `/usr/bin`. Otherwise add its directory to `PATH` via a unit override:
-  `sudo systemctl edit claude-custom-gateway@$USER`.
+- **Requests fail with "claude CLI not found"**: the service looks in `PATH`
+  (`~/.local/bin`, `/usr/local/bin`, `/usr/bin`), then `~/.claude/local`, `~/.npm-global/bin` and the
+  Claude Code VS Code extension's bundled binary. If yours is elsewhere, set
+  `CLAUDE_SERVICE_CLAUDE_BIN=/path/to/claude` in `/etc/default/claude-custom-gateway` and restart.
+  `curl localhost:6069/health` shows which binary the service is using.
+- **`claude` disappeared after an auto-update** (npm installs; `npm install -g` then fails with
+  `ENOTEMPTY ... .claude-code-XXXX`): an interrupted update left stale files. Run
+  `rm -rf ~/.npm-global/lib/node_modules/@anthropic-ai/.claude-code-* ~/.npm-global/bin/.claude-*`,
+  then `npm install -g @anthropic-ai/claude-code`, and restart the service.
 - **Not authenticated**: run `claude` as the service user and log in, then restart the service.
 - **Port in use**: change `CLAUDE_SERVICE_PORT` in `/etc/default/claude-custom-gateway`.
 

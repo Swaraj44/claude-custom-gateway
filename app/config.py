@@ -1,21 +1,51 @@
 import os
+import re
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Tuple
+from typing import List, Tuple
+
+
+def _version_key(path: Path) -> Tuple[int, ...]:
+    # ".../anthropic.claude-code-2.1.318-linux-x64/..." -> (2, 1, 318)
+    name = path.parents[2].name if len(path.parents) > 2 else ""
+    match = re.search(r"-(\d+(?:\.\d+)*)", name)
+    return tuple(int(p) for p in match.group(1).split(".")) if match else ()
+
+
+def _editor_bundled_bins() -> List[Path]:
+    """Native CLI binaries shipped inside the Claude Code editor extension, newest first."""
+    found: List[Path] = []
+    for editor_dir in (".vscode", ".vscode-server", ".vscode-oss", ".cursor", ".windsurf"):
+        ext_root = Path.home() / editor_dir / "extensions"
+        for name in ("claude", "claude.exe"):
+            found.extend(ext_root.glob("anthropic.claude-code-*/resources/native-binary/" + name))
+    return sorted(found, key=_version_key, reverse=True)
+
+
+def _is_executable(path: Path) -> bool:
+    return path.is_file() and os.access(str(path), os.X_OK)
 
 
 def _find_claude_bin() -> str:
+    override = os.environ.get("CLAUDE_SERVICE_CLAUDE_BIN", "").strip()
+    if override:
+        return shutil.which(override) or os.path.expanduser(override)
     found = shutil.which("claude")
     if found:
         return found
+    home = Path.home()
     candidates = [
-        Path.home() / ".local" / "bin" / "claude.exe",
-        Path.home() / ".local" / "bin" / "claude",
+        home / ".local" / "bin" / "claude.exe",
+        home / ".local" / "bin" / "claude",
+        home / ".claude" / "local" / "claude",
+        home / ".npm-global" / "bin" / "claude",
+        Path("/usr/local/bin/claude"),
         Path(os.environ.get("APPDATA", "")) / "npm" / "claude.cmd",
     ]
+    candidates += _editor_bundled_bins()
     for c in candidates:
-        if c.is_file():
+        if _is_executable(c):
             return str(c)
     return "claude"
 

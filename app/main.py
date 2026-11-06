@@ -50,8 +50,10 @@ app = create_app()
 
 
 def main() -> None:
-    if shutil.which("claude") is None:
-        print("warning: 'claude' CLI not found on PATH; requests will fail until it is available", file=sys.stderr)
+    if shutil.which(settings.claude_bin) is None:
+        print("warning: claude CLI not found (looked for '%s'); install it or set "
+              "CLAUDE_SERVICE_CLAUDE_BIN, requests will fail until it is available"
+              % settings.claude_bin, file=sys.stderr)
     print("Claude Custom Gateway (FastAPI) running")
     print("  Web UI:    http://%s:%d/" % (settings.host, settings.port))
     print("  Chat API:  POST http://%s:%d/api/chat" % (settings.host, settings.port))

@@ -10,4 +10,6 @@ CLAUDE_SERVICE_API_KEY=change-me
 CLAUDE_SERVICE_VISION_MODEL=sonnet
 CLAUDE_SERVICE_PROMPT_CACHE_TTL=1h
 # CLAUDE_SERVICE_EFFORT=low
+# Path to the claude CLI (auto-detected when unset).
+# CLAUDE_SERVICE_CLAUDE_BIN=/home/<user>/.local/bin/claude
 # CLAUDE_SERVICE_LOG_PAYLOADS=0

@@ -306,6 +306,30 @@ function handleEvent(ev) {
   if (ev.cost_usd != null) setStatus('done (cost $' + ev.cost_usd.toFixed(4) + ')', 'done');
   if (ev.error) appendText('[error] ' + ev.error, 'err');
 }
+
+// Replace the static model options with every model the Claude CLI offers.
+async function loadModels() {
+  const select = document.getElementById('model');
+  try {
+    const res = await fetch('/v1/models', {
+      headers: { 'X-API-Key': document.getElementById('apikey').value.trim() }
+    });
+    if (!res.ok) return;
+    const models = (await res.json()).data || [];
+    if (!models.length) return;
+    const current = select.value;
+    select.innerHTML = '<option value="">Default model</option>';
+    for (const m of models) {
+      const opt = document.createElement('option');
+      opt.value = m.id;
+      opt.textContent = m.name && m.name !== m.id ? m.name + ' — ' + m.id : m.id;
+      select.appendChild(opt);
+    }
+    select.value = current;
+  } catch (e) { /* keep the static options */ }
+}
+document.getElementById('apikey').addEventListener('change', loadModels);
+loadModels();
 </script>
 </body>
 </html>

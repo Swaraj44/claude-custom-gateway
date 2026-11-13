@@ -30,7 +30,7 @@ Run it from anywhere:
 | Variable  | Source                                   | Example                 |
 |-----------|------------------------------------------|-------------------------|
 | `ROOT`    | Parent directory of `packaging/`         | project root            |
-| `VERSION` | `version = "..."` in `pyproject.toml`    | `0.3.1`                 |
+| `VERSION` | `version = "..."` in `pyproject.toml`    | `1.5.0`                 |
 | `ARCH`    | `dpkg --print-architecture`              | `amd64`                 |
 | `PYMM`    | Major.minor version of the build Python  | `3.12`                  |
 | `STAGE`   | A temporary directory                    | `/tmp/tmp.XXXX`         |
@@ -142,7 +142,9 @@ sudo nano /etc/default/claude-custom-gateway
 | `CLAUDE_SERVICE_VISION_MODEL`     | `sonnet`   | Model used for vision requests              |
 | `CLAUDE_SERVICE_PROMPT_CACHE_TTL` | `1h`       | Prompt cache TTL                            |
 | `CLAUDE_SERVICE_EFFORT`           | (unset)    | Optional effort level                       |
+| `CLAUDE_SERVICE_MODELS`           | (unset)    | Comma-separated model IDs for `/v1/models`  |
 | `CLAUDE_SERVICE_LOG_PAYLOADS`     | (unset)    | Optional payload logging                    |
+| `CLAUDE_SERVICE_LOG_PAYLOAD_MAX`  | (unset)    | Max characters per logged payload (0 = none)|
 
 Use plain `KEY=value` lines. Do not add `export`.
 

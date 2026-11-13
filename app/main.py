@@ -10,6 +10,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app import __version__
 from app.config import settings
+from app.models import model_ids
 from app.apis import api_router
 from app import payload_logging
 from app.payload_logging import PayloadLoggingMiddleware
@@ -69,7 +70,7 @@ def main() -> None:
     if settings.api_key:
         print("  Auth:      API key required (CLAUDE_SERVICE_API_KEY is set)")
     print("  Claude:    %s | timeout: %ds | models: %s"
-          % (settings.claude_bin, settings.timeout, ", ".join(settings.models)))
+          % (settings.claude_bin, settings.timeout, ", ".join(model_ids())))
     print("Press Ctrl+C to stop")
     uvicorn.run(app, host=settings.host, port=settings.port, log_level="info")
 

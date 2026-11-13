@@ -24,8 +24,10 @@ Build on the same Ubuntu release you deploy to.
 ## 2. Install
 
 ```bash
-sudo apt install ./dist/claude-custom-gateway_1.4.1_amd64.deb
+sudo apt install ./dist/claude-custom-gateway_1.5.0_amd64.deb
 ```
+
+Running from source instead? See the [README](README.md).
 
 `apt` pulls in `python3-venv` and `python3-pip` automatically. The install creates a virtualenv in
 `/opt/claude-custom-gateway/venv`.
@@ -37,7 +39,9 @@ sudo nano /etc/default/claude-custom-gateway
 ```
 
 At minimum, **change `CLAUDE_SERVICE_API_KEY`**. Set `CLAUDE_SERVICE_HOST=127.0.0.1` to accept
-local connections only. Settings are listed in `.env.example`. Edits survive package upgrades.
+local connections only. The full list of `CLAUDE_SERVICE_*` settings and their defaults is in the
+[README configuration table](README.md#configuration-environment-variables); the config file uses plain
+`KEY=value` lines (no `export`). Edits survive package upgrades.
 
 ## 4. Start the service
 
@@ -80,6 +84,11 @@ After changing the config: `sudo systemctl restart claude-custom-gateway@$USER`.
   then `npm install -g @anthropic-ai/claude-code`, and restart the service.
 - **Not authenticated**: run `claude` as the service user and log in, then restart the service.
 - **Port in use**: change `CLAUDE_SERVICE_PORT` in `/etc/default/claude-custom-gateway`.
+
+## Connect a client
+
+Point any OpenAI-compatible client (e.g. Kilo Code) at `http://127.0.0.1:6069/v1` with your `CLAUDE_SERVICE_API_KEY`.
+See [Connect Third-Party Coding Agents](README.md#connect-third-party-coding-agents).
 
 ## Upgrade
 

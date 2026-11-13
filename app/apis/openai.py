@@ -8,6 +8,7 @@ from fastapi.responses import StreamingResponse
 
 from app.claude_cli import run_claude_once
 from app.config import settings
+from app.models import available_models
 from app.openai_compat import (
     build_tools_section,
     messages_to_prompt_and_blocks,
@@ -27,7 +28,18 @@ def list_models():
     now = int(time.time())
     return {
         "object": "list",
-        "data": [{"id": m, "object": "model", "created": now, "owned_by": "claude-cli"} for m in settings.models],
+        "data": [
+            {
+                "id": m["id"],
+                "object": "model",
+                "created": now,
+                "owned_by": "claude-cli",
+                "name": m["name"],
+                "description": m["description"],
+                "alias_for": m["alias_for"],
+            }
+            for m in available_models()
+        ],
     }
 
 

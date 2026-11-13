@@ -56,7 +56,6 @@ class Settings:
     port: int = 6069
     timeout: int = 600
     api_key: str = "swaraj"
-    models: Tuple[str, ...] = ("sonnet", "opus", "haiku")
     vision_model: str = "sonnet"
     system_prompt_max: int = 100_000
     # TTL of the prompt-cache breakpoint placed on the last conversation block

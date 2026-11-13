@@ -127,8 +127,27 @@ def run_claude_once(prompt: str, model: Optional[str] = None, session_id: Option
     data, err = _run_claude_once(prompt, model, session_id, system_prompt, raw_model, content_blocks)
     if raw_model and err is None and (data.get("result") or "").strip() == MALFORMED_TOOL_USE_RESULT:
         # Sampling usually differs on a fresh run; one retry beats failing the agent's turn.
+        failed = data
         data, err = _run_claude_once(prompt, model, session_id, system_prompt, raw_model, content_blocks)
+        if err is None:
+            add_usage(data, failed)
     return data, err
+
+
+USAGE_TOKEN_KEYS = ("input_tokens", "output_tokens", "cache_creation_input_tokens",
+                    "cache_read_input_tokens")
+
+
+def add_usage(data: dict, earlier: dict) -> None:
+    """Add an earlier attempt's tokens and cost to `data`, so a retry is not reported as free."""
+    usage = dict(data.get("usage") or {})
+    earlier_usage = earlier.get("usage") or {}
+    for key in USAGE_TOKEN_KEYS:
+        if earlier_usage.get(key):
+            usage[key] = (usage.get(key) or 0) + earlier_usage[key]
+    data["usage"] = usage
+    if earlier.get("total_cost_usd"):
+        data["total_cost_usd"] = (data.get("total_cost_usd") or 0) + earlier["total_cost_usd"]
 
 
 def _run_claude_once(prompt: str, model: Optional[str], session_id: Optional[str],
@@ -177,6 +196,7 @@ def _spawn_once(prompt: str, model: Optional[str], session_id: Optional[str],
         except json.JSONDecodeError:
             return None, error(502, "claude CLI returned invalid JSON")
     result_event = None
+    stop_reason = None
     for line in proc.stdout.splitlines():
         line = line.strip()
         if not line:
@@ -185,9 +205,12 @@ def _spawn_once(prompt: str, model: Optional[str], session_id: Optional[str],
             event = json.loads(line)
         except json.JSONDecodeError:
             continue
-        if event.get("type") == "result":
+        if event.get("type") == "assistant":
+            stop_reason = (event.get("message") or {}).get("stop_reason") or stop_reason
+        elif event.get("type") == "result":
             result_event = event
     if result_event is not None:
+        result_event.setdefault("stop_reason", stop_reason)
         return result_event, None
     err = (proc.stderr or "").strip()
     if not err:
@@ -240,6 +263,7 @@ def _stream_events(prompt: str, model: Optional[str], session_id: Optional[str],
     timer = threading.Timer(settings.timeout, kill_process, args=(proc,))
     timer.start()
     got_result = False
+    stop_reason = None
     try:
         for line in proc.stdout:
             line = line.strip()
@@ -251,6 +275,7 @@ def _stream_events(prompt: str, model: Optional[str], session_id: Optional[str],
                 continue
             etype = event.get("type")
             if etype == "assistant":
+                stop_reason = event.get("message", {}).get("stop_reason") or stop_reason
                 for block in event.get("message", {}).get("content", []):
                     if block.get("type") == "text" and block.get("text"):
                         yield {"kind": "text", "text": block["text"]}
@@ -264,6 +289,7 @@ def _stream_events(prompt: str, model: Optional[str], session_id: Optional[str],
                     "is_error": event.get("is_error", False),
                     "result": event.get("result", ""),
                     "usage": event.get("usage") or {},
+                    "stop_reason": event.get("stop_reason") or stop_reason,
                 }
         proc.wait()
         if not got_result:

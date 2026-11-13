@@ -14,6 +14,7 @@ from app.openai_compat import (
     messages_to_prompt_and_blocks,
     openai_stream,
     parse_function_calls,
+    reply_was_truncated,
     usage_dict,
 )
 from app.schemas import ChatCompletionRequest
@@ -77,10 +78,22 @@ def openai_chat_completions(req: ChatCompletionRequest):
         return err
     if data.get("is_error"):
         return error(502, data.get("result") or "claude CLI reported an error")
-    tool_calls, content = parse_function_calls(data.get("result", ""), tool_names or None)
+    raw = data.get("result", "")
+    tool_calls, content = parse_function_calls(raw, tool_names or None)
+    # A reply cut off by the token limit must be visible, not a silent
+    # missing-argument failure: flag it in the content and finish_reason.
+    truncated = data.get("stop_reason") == "max_tokens" or (has_tools and reply_was_truncated(raw))
+    if truncated:
+        content = ((content or "").rstrip() + "\n\n[token limit reached — reply truncated]").strip()
     message = {"role": "assistant", "content": content if content else None}
     if tool_calls:
         message["tool_calls"] = tool_calls
+    if tool_calls:
+        finish_reason = "tool_calls"
+    elif truncated:
+        finish_reason = "length"
+    else:
+        finish_reason = "stop"
     return {
         "id": "chatcmpl-" + uuid.uuid4().hex,
         "object": "chat.completion",
@@ -89,7 +102,7 @@ def openai_chat_completions(req: ChatCompletionRequest):
         "choices": [{
             "index": 0,
             "message": message,
-            "finish_reason": "tool_calls" if tool_calls else "stop",
+            "finish_reason": finish_reason,
         }],
         "usage": usage_dict(data.get("usage") or {}, data.get("total_cost_usd"),
                             data.get("session_id")),

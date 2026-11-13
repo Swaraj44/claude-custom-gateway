@@ -6,18 +6,22 @@ import uuid
 from typing import Optional
 
 from app.claude_cli import claude_events, run_claude_once
-from app.openai_compat.tools import parse_function_calls
+from app.openai_compat.tools import parse_function_calls, reply_was_truncated
+
+TRUNCATION_NOTE = "\n[token limit reached — reply truncated]"
 from app.utils import sse
 
 
 def usage_dict(usage: dict, cost_usd: Optional[float] = None,
                session_id: Optional[str] = None) -> dict:
-    pt = usage.get("input_tokens") or 0
+    cached = usage.get("cache_read_input_tokens") or 0
+    cache_creation = usage.get("cache_creation_input_tokens") or 0
+    # Anthropic's input_tokens counts only the uncached remainder, while OpenAI's prompt_tokens is the whole prompt (cached_tokens is a subset of it). Clients
+    # size their context window and trigger compaction from prompt_tokens, so leaving the cached part out makes a 100k-token conversation look like 2.
+    pt = (usage.get("input_tokens") or 0) + cached + cache_creation
     ct = usage.get("output_tokens") or 0
     out = {"prompt_tokens": pt, "completion_tokens": ct, "total_tokens": pt + ct}
     details = {}
-    cached = usage.get("cache_read_input_tokens") or 0
-    cache_creation = usage.get("cache_creation_input_tokens") or 0
     if cached:
         details["cached_tokens"] = cached
     if cache_creation:
@@ -78,9 +82,13 @@ def openai_stream(model: Optional[str], prompt: str, system_prompt: Optional[str
                 yield chunk(finish_reason="stop")
                 yield b"data: [DONE]\n\n"
                 return
-            tool_calls, content = parse_function_calls(data.get("result", ""), tool_names)
+            raw = data.get("result", "")
+            tool_calls, content = parse_function_calls(raw, tool_names)
+            truncated = data.get("stop_reason") == "max_tokens" or reply_was_truncated(raw)
             if content:
                 yield chunk(delta={"content": content})
+            if truncated:
+                yield chunk(delta={"content": TRUNCATION_NOTE})
             usage = usage_dict(data.get("usage") or {}, data.get("total_cost_usd"),
                                data.get("session_id"))
             if tool_calls:
@@ -95,7 +103,8 @@ def openai_stream(model: Optional[str], prompt: str, system_prompt: Optional[str
                 if include_usage:
                     yield chunk(choices=[], usage=usage)
             else:
-                yield chunk(finish_reason="stop", usage=None if include_usage else usage)
+                yield chunk(finish_reason="length" if truncated else "stop",
+                            usage=None if include_usage else usage)
                 if include_usage:
                     yield chunk(choices=[], usage=usage)
         yield b"data: [DONE]\n\n"
@@ -113,7 +122,11 @@ def openai_stream(model: Optional[str], prompt: str, system_prompt: Optional[str
                 continue
             usage = usage_dict(ev.get("usage") or {}, ev.get("cost_usd"),
                                ev.get("session_id"))
-            yield chunk(finish_reason="stop", usage=None if include_usage else usage)
+            truncated = ev.get("stop_reason") == "max_tokens"
+            if truncated:
+                yield chunk(delta={"content": TRUNCATION_NOTE})
+            yield chunk(finish_reason="length" if truncated else "stop",
+                        usage=None if include_usage else usage)
             if include_usage:
                 yield chunk(choices=[], usage=usage)
         elif kind == "error":

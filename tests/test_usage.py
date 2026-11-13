@@ -15,7 +15,9 @@ def test_usage_cache_fields_surfaced():
         "cache_creation_input_tokens": 1000,
         "cache_read_input_tokens": 2000,
     })
-    assert out["prompt_tokens"] == 12
+    # OpenAI semantics: prompt_tokens is the whole prompt, cached part included.
+    assert out["prompt_tokens"] == 3012
+    assert out["total_tokens"] == 3019
     assert out["prompt_tokens_details"]["cached_tokens"] == 2000
     assert out["cache_creation_input_tokens"] == 1000
     assert out["cache_read_input_tokens"] == 2000
@@ -48,3 +50,11 @@ def test_usage_cache_details():
     assert out["prompt_tokens_details"] == {
         "cached_tokens": 2000, "cache_creation_tokens": 1000,
     }
+
+
+def test_usage_cached_tokens_never_exceed_prompt_tokens():
+    out = usage_dict({"input_tokens": 2, "output_tokens": 4,
+                      "cache_creation_input_tokens": 449,
+                      "cache_read_input_tokens": 12913})
+    assert out["prompt_tokens"] == 2 + 449 + 12913
+    assert out["prompt_tokens_details"]["cached_tokens"] <= out["prompt_tokens"]

@@ -4,7 +4,7 @@
 
 > **In short:** you authenticate once with the Claude CLI, run this service locally, and any OpenAI-compatible tool can talk to Claude through it.
 
-> **Two ways to install:** run from source with a virtualenv (this README, Steps 1-3), or install the Ubuntu/Debian `.deb` package that runs the gateway as a systemd service — see [INSTALL.md](INSTALL.md).
+> **Three ways to install:** run from source with a virtualenv (this README, Steps 1-3), install the Ubuntu/Debian `.deb` package that runs the gateway as a systemd service, or install it on Windows as a Task Scheduler task — see [INSTALL.md](INSTALL.md).
 
 ---
 
@@ -16,6 +16,7 @@
 - [Step 3 — Run the Service](#step-3--run-the-service)
 - [Configuration](#configuration-environment-variables)
 - [Install as a systemd service (.deb)](#install-as-a-systemd-service-deb)
+- [Install as a Windows Task Scheduler task](#install-as-a-windows-task-scheduler-task)
 - [Connect Third-Party Coding Agents](#connect-third-party-coding-agents)
 - [Endpoints](#endpoints)
 - [API Examples](#api-examples)
@@ -36,7 +37,7 @@
 
 > **Important:** This service does not handle Claude authentication itself — it shells out to the `claude` CLI. You **must** install the CLI and log in before using this project.
 
-> **Platform support:** These setup instructions have been **fully tested on Linux**. The Windows and macOS instructions are provided as guidance but **have not been tested yet** — if you hit a problem on those platforms, see [Troubleshooting](#troubleshooting).
+> **Platform support:** These setup instructions have been **fully tested on Linux** and, for the Windows Command Prompt setup and the Task Scheduler installer, on **Windows**. The macOS and Windows PowerShell instructions are provided as guidance but **have not been tested yet** — if you hit a problem on those platforms, see [Troubleshooting](#troubleshooting).
 
 ## Step 1 — Install & Authenticate the Claude CLI
 
@@ -160,7 +161,7 @@ pip install -r requirements.txt
 > Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
 > ```
 
-### Windows (Command Prompt, untested)
+### Windows (Command Prompt, tested)
 
 ```bat
 git clone <repository-url>
@@ -237,7 +238,7 @@ Streaming (SSE) responses still reach the client chunk by chunk; the full body i
 | `CLAUDE_SERVICE_API_KEY`          | `swaraj`  | API key required on all`/api/*` and `/v1/*` endpoints via `Authorization: Bearer <key>` or `x-api-key` header. Empty = disable                                                                                                                                                                                          |
 | `CLAUDE_SERVICE_MODELS`           | _(unset)_ | Comma-separated model IDs for `/v1/models`. When unset, the list is read from the Claude CLI's model catalog cache (`~/.claude/cache/model-catalog/`, or `$CLAUDE_CONFIG_DIR`) — the same models shown in Claude Code's `/model` picker — falling back to `sonnet, opus, haiku`                                     |
 | `CLAUDE_SERVICE_VISION_MODEL`     | `sonnet`  | Model used for `/v1/chat/completions` requests that contain images and omit `model`                                                                                                                                                                                                                                         |
-| `CLAUDE_SERVICE_PROMPT_CACHE_TTL` | `1h`      | Prompt-cache TTL for conversation history on`/v1/chat/completions` (`1h`, `5m`, or `off`). Each turn reads earlier turns from cache instead of re-sending them at full price. Must match the CLI's own cache TTL: `1h` for Claude subscription logins; try `5m` if requests fail with a `cache_control.ttl` error |
+| `CLAUDE_SERVICE_PROMPT_CACHE_TTL` | `1h`      | Prompt-cache TTL for conversation history on`/v1/chat/completions` (`1h` or `off`). Each turn reads earlier turns from cache instead of re-sending them at full price. Recent CLI versions cache the history themselves, so `off` costs nothing there; set `off` if requests fail with a `cache_control.ttl` error. `5m` is no longer supported and is treated as `off` |
 | `CLAUDE_SERVICE_EFFORT`           | _(unset)_ | Optional`--effort` level (`low`, `medium`, `high`, `xhigh`, `max`) for `/v1/chat/completions`. Lower effort = fewer thinking/output tokens                                                                                                                                                                        |
 | `CLAUDE_SERVICE_CLAUDE_BIN`       | _(auto)_  | Path to the `claude` CLI. Unset = auto-detect: `PATH`, then `~/.local/bin`, `~/.claude/local`, `~/.npm-global/bin`, `/usr/local/bin`, then the newest binary bundled with the Claude Code VS Code / Cursor extension                                                                                                |
 | `CLAUDE_SERVICE_LOG_PAYLOADS`     | `0`       | Log every request/response body (`1` to enable). `claude-debug` forces it on, `claude-pro` forces it off; applies to `python -m app` / `claude-custom-gateway`                                                                                                                                                        |
@@ -257,7 +258,7 @@ python -m app
 ```
 
 ```bat
-:: Windows (Command Prompt) — untested
+:: Windows (Command Prompt)
 set CLAUDE_SERVICE_PORT=9000
 python -m app
 ```
@@ -278,6 +279,17 @@ sudo systemctl enable --now claude-custom-gateway@$USER
 ```
 
 The service runs as the chosen user, so the `claude` CLI must be installed and logged in as that user. The packaged config file uses the same `CLAUDE_SERVICE_*` variables listed above. Full instructions (prerequisites, upgrade, uninstall, troubleshooting) are in [INSTALL.md](INSTALL.md); internals of the package are in [packaging/README.md](packaging/README.md).
+
+### Install as a Windows Task Scheduler task
+
+For a persistent Windows deployment, run the installer from a checkout of this repo (requires Python 3.9+ and a logged-in `claude` CLI):
+
+```powershell
+powershell -ExecutionPolicy Bypass -File packaging\windows\install.ps1              # start at logon
+powershell -ExecutionPolicy Bypass -File packaging\windows\install.ps1 -AtStartup   # start at boot (admin)
+```
+
+It creates a virtualenv in `%LOCALAPPDATA%\claude-custom-gateway`, registers the `ClaudeCustomGateway` scheduled task, and writes `config.env` (random API key, bound to `127.0.0.1`). See [INSTALL.md](INSTALL.md#windows-task-scheduler) for details.
 
 ---
 
@@ -317,7 +329,7 @@ Point the client at the base URL `http://<host>:6069/v1` with the API key above,
 - **Images are supported:** `user` messages with content-part arrays may include `{"type": "image_url", "image_url": {"url": "data:image/png;base64,..."}}` (JPEG/PNG/GIF/WebP data URLs). When images are present, the service sends the conversation to the CLI as a stream-json user message containing base64 image blocks — so pasting screenshots into Kilo Code works. Remote (`http:///https://`) image URLs are not fetched; they are skipped.
 - The service extracts the `system` message and passes it to the CLI via `--system-prompt` (replacing Claude Code's own agent system prompt).
 - The remaining messages are flattened into a conversation transcript and sent to `claude -p` via stdin.
-- **Raw-model mode:** `/v1/*` requests run the CLI with all tools disabled (`--tools "" --strict-mcp-config`), so the model answers only from the messages the client sends — it never reads or writes files itself. Tool execution is the client's job.
+- **Raw-model mode:** `/v1/*` requests run the CLI with all tools disabled (`--tools "" --strict-mcp-config`, plus `--no-session-persistence` for one-shot calls so no transcript is saved to disk), so the model answers only from the messages the client sends — it never reads or writes files itself. Tool execution is the client's job.
 - **Function-calling bridge:** when the request contains `tools`, their JSON schemas are injected into the system prompt with instructions to call them using `<tool_call name="..."><arg name="...">value</arg></tool_call>` blocks. (Claude's native `<function_calls>`/`<invoke>` syntax is deliberately avoided: written as plain text, the API mistakes it for a real tool call and the CLI replies "The model's tool call could not be parsed".) Previous assistant `tool_calls` are rendered back into that format in the transcript, and `tool` role messages become `<tool_result name="...">` blocks. When the model's reply contains `<tool_call>` blocks, they are parsed back into OpenAI `tool_calls` with `finish_reason: "tool_calls"` — the parser tolerates unclosed blocks, markdown code fences, and the legacy `<function_calls>` syntax. Non-string argument values (numbers, booleans, arrays, objects) are converted from JSON form.
 - With tools present, streaming responses are buffered until generation completes (tool calls must be parsed whole), so the first chunk arrives after the model finishes. Without tools, chunks stream live.
 - The native `/api/*` endpoints keep the CLI's full agent capabilities (it can read/analyze files in its working directory).

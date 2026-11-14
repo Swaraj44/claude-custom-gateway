@@ -7,12 +7,10 @@ venv/
 .ruff_cache/
 *.egg-info/
 build/
-dist/
 .coverage
 htmlcov/
 .mypy_cache/
 .idea/
 .vscode/
 *.log
-dist/
 .kilo/

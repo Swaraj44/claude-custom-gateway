@@ -51,6 +51,10 @@ def build_cmd(model: Optional[str] = None, session_id: Optional[str] = None,
         cmd += ["--input-format", "stream-json"]
     if raw_model:
         cmd += ["--tools", "", "--strict-mcp-config"]
+        if not session_id:
+            # One-shot calls are never resumed; without this the CLI saves a
+            # transcript of every request (the whole resent conversation) to disk.
+            cmd.append("--no-session-persistence")
         if settings.effort:
             cmd += ["--effort", settings.effort]
         # Without --system-prompt the CLI sends its full coding-agent prompt
@@ -90,15 +94,30 @@ def cli_env(raw_model: bool = False) -> Dict[str, str]:
     return env
 
 
+NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
+
 def kill_process(proc: subprocess.Popen) -> None:
-    if proc.poll() is None:
+    if proc.poll() is not None:
+        return
+    if os.name == "nt":
+        # No process groups on Windows; taskkill /T takes the CLI's child processes down too.
+        try:
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                           capture_output=True, timeout=10, creationflags=NO_WINDOW)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+    else:
         try:
             os.killpg(proc.pid, signal.SIGKILL)
-        except (ProcessLookupError, PermissionError, OSError):
-            try:
-                proc.kill()
-            except OSError:
-                pass
+            return
+        except OSError:
+            pass
+    if proc.poll() is None:
+        try:
+            proc.kill()
+        except OSError:
+            pass
 
 
 def stdin_payload(prompt: str, content_blocks: Optional[List[dict]]) -> str:
@@ -106,13 +125,14 @@ def stdin_payload(prompt: str, content_blocks: Optional[List[dict]]) -> str:
     if content_blocks is None:
         return prompt
     blocks = content_blocks
-    if blocks and settings.prompt_cache_ttl in ("1h", "5m"):
-        # The CLI does not cache the user message itself; marking its last block
-        # lets the next turn (same blocks + new ones) read this history from cache.
-        # The CLI's own breakpoints use 1h on subscription logins, and a 1h
-        # breakpoint may not follow a 5m one, so the TTL must match the CLI's.
+    if blocks and settings.prompt_cache_ttl == "1h":
+        # Older CLIs do not cache the user message; marking its last block lets
+        # the next turn (same blocks + new ones) read this history from cache.
+        # Newer CLIs (2.1.325) add their own 1h breakpoint after the user
+        # message, which makes this marker redundant, and makes a 5m marker
+        # invalid: the API rejects a 1h breakpoint that follows a 5m one.
         blocks = list(blocks)
-        blocks[-1] = dict(blocks[-1], cache_control={"type": "ephemeral", "ttl": settings.prompt_cache_ttl})
+        blocks[-1] = dict(blocks[-1], cache_control={"type": "ephemeral", "ttl": "1h"})
     return json.dumps({"type": "user", "message": {"role": "user", "content": blocks}})
 
 
@@ -180,6 +200,7 @@ def _spawn_once(prompt: str, model: Optional[str], session_id: Optional[str],
             encoding="utf-8",
             timeout=settings.timeout,
             env=cli_env(raw_model),
+            creationflags=NO_WINDOW,
         )
     except OSError as exc:
         return None, error(500, _start_error(exc))
@@ -246,6 +267,7 @@ def _stream_events(prompt: str, model: Optional[str], session_id: Optional[str],
             encoding="utf-8",
             start_new_session=True,
             env=cli_env(raw_model),
+            creationflags=NO_WINDOW,
         )
     except OSError as exc:
         stderr_file.close()

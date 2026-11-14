@@ -24,7 +24,12 @@ def _editor_bundled_bins() -> List[Path]:
 
 
 def _is_executable(path: Path) -> bool:
-    return path.is_file() and os.access(str(path), os.X_OK)
+    if not path.is_file():
+        return False
+    if os.name == "nt":
+        exts = os.environ.get("PATHEXT", ".COM;.EXE;.BAT;.CMD").lower().split(";")
+        return path.suffix.lower() in exts
+    return os.access(str(path), os.X_OK)
 
 
 def _find_claude_bin() -> str:
@@ -58,8 +63,9 @@ class Settings:
     api_key: str = "swaraj"
     vision_model: str = "sonnet"
     system_prompt_max: int = 100_000
-    # TTL of the prompt-cache breakpoint placed on the last conversation block
-    # ("1h", "5m", or "off"). Lets each turn reuse the previous turn's history.
+    # Prompt-cache breakpoint placed on the last conversation block ("1h" or
+    # "off"). Lets each turn reuse the previous turn's history on CLIs that do
+    # not cache the user message themselves.
     prompt_cache_ttl: str = "1h"
     # Optional --effort level for OpenAI-compatible calls (low/medium/high/...).
     effort: str = ""
@@ -69,6 +75,11 @@ class Settings:
     log_payload_max: int = 0
 
 
+def _prompt_cache_ttl() -> str:
+    value = os.environ.get("CLAUDE_SERVICE_PROMPT_CACHE_TTL", "1h").strip().lower()
+    return "1h" if value == "1h" else "off"
+
+
 def load_settings() -> Settings:
     return Settings(
         host=os.environ.get("CLAUDE_SERVICE_HOST", "0.0.0.0"),
@@ -76,7 +87,7 @@ def load_settings() -> Settings:
         timeout=int(os.environ.get("CLAUDE_SERVICE_TIMEOUT", "600")),
         api_key=os.environ.get("CLAUDE_SERVICE_API_KEY", "swaraj"),
         vision_model=os.environ.get("CLAUDE_SERVICE_VISION_MODEL", "sonnet"),
-        prompt_cache_ttl=os.environ.get("CLAUDE_SERVICE_PROMPT_CACHE_TTL", "1h").strip().lower(),
+        prompt_cache_ttl=_prompt_cache_ttl(),
         effort=os.environ.get("CLAUDE_SERVICE_EFFORT", "").strip().lower(),
         claude_bin=_find_claude_bin(),
         log_payloads=os.environ.get("CLAUDE_SERVICE_LOG_PAYLOADS", "0").strip().lower() not in ("0", "false", "no", "off"),

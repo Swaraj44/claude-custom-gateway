@@ -63,3 +63,10 @@ def test_stream_yields_error_event_on_spawn_oserror(monkeypatch):
     monkeypatch.setattr(claude_cli.subprocess, "Popen", fake_popen)
     events = list(claude_cli.claude_events("hi", system_prompt=BIG, raw_model=True))
     assert events == [{"kind": "error", "message": "could not start claude CLI: [Errno 7] Argument list too long"}]
+
+
+def test_raw_model_calls_do_not_persist_sessions():
+    assert "--no-session-persistence" in claude_cli.build_cmd("haiku", raw_model=True)
+    # Native calls can be resumed, so their sessions must still be saved.
+    assert "--no-session-persistence" not in claude_cli.build_cmd("haiku")
+    assert "--no-session-persistence" not in claude_cli.build_cmd("haiku", session_id="abc")

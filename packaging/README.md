@@ -1,16 +1,21 @@
 # Packaging: How It Works
 
-The `packaging/` folder turns the Python project into a Debian package (`.deb`). Once installed, the gateway runs as a systemd service under a chosen user account.
+The `packaging/` folder turns the Python project into a Debian package (`.deb`) for Linux, and provides a Task Scheduler installer for Windows (see [Windows](#windows-task-scheduler-installer) at the end). Once installed from the `.deb`, the gateway runs as a systemd service under a chosen user account.
 
 ```
 packaging/
 ├── build-deb.sh                      # Builds the .deb
 ├── claude-custom-gateway@.service    # systemd template unit
-└── debian/
-    ├── default                       # Config file -> /etc/default/claude-custom-gateway
-    ├── postinst                      # Runs after install/upgrade
-    ├── prerm                         # Runs before removal
-    └── postrm                        # Runs after removal
+├── debian/
+│   ├── default                       # Config file -> /etc/default/claude-custom-gateway
+│   ├── postinst                      # Runs after install/upgrade
+│   ├── prerm                         # Runs before removal
+│   └── postrm                        # Runs after removal
+└── windows/
+    ├── install.ps1                   # Installs venv + registers the scheduled task
+    ├── uninstall.ps1                 # Removes the task and install dir
+    ├── gateway_task.py               # Task entry point: loads config.env, logs, restarts on crash
+    └── config.env                    # Config template -> %LOCALAPPDATA%\claude-custom-gateway\config.env
 ```
 
 ---
@@ -228,3 +233,21 @@ build-deb.sh ──► dist/*.deb
         apt remove   ▼
    prerm: stop units ─► delete files ─► postrm: delete venv
 ```
+---
+
+## Windows Task Scheduler installer
+
+`windows/install.ps1` is run from a repo checkout (it pip-installs the project from the repo root). Requires Python 3.9+ (looked up as `py -3`, `python`, `python3`, or passed with `-Python <path>`).
+
+1. Stops any existing `ClaudeCustomGateway` task, then recreates the virtualenv in `%LOCALAPPDATA%\claude-custom-gateway\venv` and installs the gateway into it.
+2. Copies `gateway_task.py` next to the venv. On first install it also writes `config.env` from the template, replacing `change-me` with a random API key. An existing `config.env` is kept.
+3. Registers the scheduled task, which runs `pythonw.exe gateway_task.py` (no console window) as the current user, with no execution time limit, and restart-on-failure every minute.
+   - Default trigger: at logon.
+   - `-AtStartup`: at boot. Needs an elevated PowerShell and prompts for your Windows password (`Get-Credential`).
+4. Starts the task and polls `/health` for up to 30 seconds (skip with `-NoStart`).
+
+Other parameters: `-InstallDir`, `-TaskName`.
+
+`gateway_task.py` loads `config.env` (plain `KEY=value` lines, `#` comments, optional quotes), appends output to `logs\gateway.log` (rotated to `gateway.log.1` above 10 MB), and restarts the gateway after 5 seconds if it crashes.
+
+`windows/uninstall.ps1` stops and unregisters the task, then deletes the install dir. With `-KeepConfig` only `venv`, `logs` and `gateway_task.py` are removed.

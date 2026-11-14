@@ -197,3 +197,9 @@ def test_raw_model_always_sends_a_system_prompt():
     cmd = claude_cli.build_cmd("haiku", raw_model=True, system_prompt="Be brief.")
     assert cmd[cmd.index("--system-prompt") + 1] == "Be brief."
     assert "--system-prompt" not in claude_cli.build_cmd("haiku")
+
+
+def test_stdin_payload_ignores_5m_ttl(monkeypatch):
+    monkeypatch.setattr(claude_cli, "settings", claude_cli.settings.__class__(prompt_cache_ttl="5m"))
+    content = json.loads(claude_cli.stdin_payload("", [{"type": "text", "text": "a"}]))["message"]["content"]
+    assert "cache_control" not in content[0]

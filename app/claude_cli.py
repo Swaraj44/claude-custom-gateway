@@ -4,7 +4,8 @@ import signal
 import subprocess
 import tempfile
 import threading
-from typing import Dict, List, Optional
+from contextlib import contextmanager
+from typing import Dict, Iterator, List, Optional, Tuple
 
 from app.config import settings
 from app.utils import error
@@ -12,10 +13,34 @@ from app.utils import error
 
 DEFAULT_RAW_SYSTEM_PROMPT = "You are a helpful assistant."
 
+# Linux caps a single argv string at 128 KiB (MAX_ARG_STRLEN), and agent
+# clients send system prompts plus tool schemas well past that. Anything over
+# this size goes to the CLI through --system-prompt-file instead of argv.
+SYSTEM_PROMPT_INLINE_MAX = 32 * 1024
+
+
+@contextmanager
+def spilled_system_prompt(system_prompt: Optional[str]) -> Iterator[Tuple[Optional[str], Optional[str]]]:
+    """Yield (inline_prompt, file_path): small prompts stay inline, large ones go to a temp file."""
+    if not system_prompt or len(system_prompt.encode("utf-8")) <= SYSTEM_PROMPT_INLINE_MAX:
+        yield system_prompt, None
+        return
+    fd, path = tempfile.mkstemp(prefix="claude-gateway-system-", suffix=".txt")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(system_prompt)
+        yield None, path
+    finally:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+
 
 def build_cmd(model: Optional[str] = None, session_id: Optional[str] = None,
               stream: bool = False, system_prompt: Optional[str] = None,
-              raw_model: bool = False, stream_input: bool = False) -> List[str]:
+              raw_model: bool = False, stream_input: bool = False,
+              system_prompt_file: Optional[str] = None) -> List[str]:
     output_format = "stream-json" if (stream or stream_input) else "json"
     cmd = [settings.claude_bin, "-p", "--output-format", output_format]
     if stream or stream_input:
@@ -26,12 +51,19 @@ def build_cmd(model: Optional[str] = None, session_id: Optional[str] = None,
         cmd += ["--input-format", "stream-json"]
     if raw_model:
         cmd += ["--tools", "", "--strict-mcp-config"]
+        if not session_id:
+            # One-shot calls are never resumed; without this the CLI saves a
+            # transcript of every request (the whole resent conversation) to disk.
+            cmd.append("--no-session-persistence")
         if settings.effort:
             cmd += ["--effort", settings.effort]
         # Without --system-prompt the CLI sends its full coding-agent prompt
         # (~3k tokens), which a plain chat request neither wants nor pays for.
-        system_prompt = system_prompt or DEFAULT_RAW_SYSTEM_PROMPT
-    if system_prompt:
+        if not system_prompt_file:
+            system_prompt = system_prompt or DEFAULT_RAW_SYSTEM_PROMPT
+    if system_prompt_file:
+        cmd += ["--system-prompt-file", system_prompt_file]
+    elif system_prompt:
         cmd += ["--system-prompt", system_prompt]
     if model:
         cmd += ["--model", model]
@@ -62,15 +94,30 @@ def cli_env(raw_model: bool = False) -> Dict[str, str]:
     return env
 
 
+NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
+
 def kill_process(proc: subprocess.Popen) -> None:
-    if proc.poll() is None:
+    if proc.poll() is not None:
+        return
+    if os.name == "nt":
+        # No process groups on Windows; taskkill /T takes the CLI's child processes down too.
+        try:
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                           capture_output=True, timeout=10, creationflags=NO_WINDOW)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+    else:
         try:
             os.killpg(proc.pid, signal.SIGKILL)
-        except (ProcessLookupError, PermissionError, OSError):
-            try:
-                proc.kill()
-            except OSError:
-                pass
+            return
+        except OSError:
+            pass
+    if proc.poll() is None:
+        try:
+            proc.kill()
+        except OSError:
+            pass
 
 
 def stdin_payload(prompt: str, content_blocks: Optional[List[dict]]) -> str:
@@ -78,13 +125,14 @@ def stdin_payload(prompt: str, content_blocks: Optional[List[dict]]) -> str:
     if content_blocks is None:
         return prompt
     blocks = content_blocks
-    if blocks and settings.prompt_cache_ttl in ("1h", "5m"):
-        # The CLI does not cache the user message itself; marking its last block
-        # lets the next turn (same blocks + new ones) read this history from cache.
-        # The CLI's own breakpoints use 1h on subscription logins, and a 1h
-        # breakpoint may not follow a 5m one, so the TTL must match the CLI's.
+    if blocks and settings.prompt_cache_ttl == "1h":
+        # Older CLIs do not cache the user message; marking its last block lets
+        # the next turn (same blocks + new ones) read this history from cache.
+        # Newer CLIs (2.1.325) add their own 1h breakpoint after the user
+        # message, which makes this marker redundant, and makes a 5m marker
+        # invalid: the API rejects a 1h breakpoint that follows a 5m one.
         blocks = list(blocks)
-        blocks[-1] = dict(blocks[-1], cache_control={"type": "ephemeral", "ttl": settings.prompt_cache_ttl})
+        blocks[-1] = dict(blocks[-1], cache_control={"type": "ephemeral", "ttl": "1h"})
     return json.dumps({"type": "user", "message": {"role": "user", "content": blocks}})
 
 
@@ -99,16 +147,50 @@ def run_claude_once(prompt: str, model: Optional[str] = None, session_id: Option
     data, err = _run_claude_once(prompt, model, session_id, system_prompt, raw_model, content_blocks)
     if raw_model and err is None and (data.get("result") or "").strip() == MALFORMED_TOOL_USE_RESULT:
         # Sampling usually differs on a fresh run; one retry beats failing the agent's turn.
+        failed = data
         data, err = _run_claude_once(prompt, model, session_id, system_prompt, raw_model, content_blocks)
+        if err is None:
+            add_usage(data, failed)
     return data, err
+
+
+USAGE_TOKEN_KEYS = ("input_tokens", "output_tokens", "cache_creation_input_tokens",
+                    "cache_read_input_tokens")
+
+
+def add_usage(data: dict, earlier: dict) -> None:
+    """Add an earlier attempt's tokens and cost to `data`, so a retry is not reported as free."""
+    usage = dict(data.get("usage") or {})
+    earlier_usage = earlier.get("usage") or {}
+    for key in USAGE_TOKEN_KEYS:
+        if earlier_usage.get(key):
+            usage[key] = (usage.get(key) or 0) + earlier_usage[key]
+    data["usage"] = usage
+    if earlier.get("total_cost_usd"):
+        data["total_cost_usd"] = (data.get("total_cost_usd") or 0) + earlier["total_cost_usd"]
 
 
 def _run_claude_once(prompt: str, model: Optional[str], session_id: Optional[str],
                      system_prompt: Optional[str], raw_model: bool,
                      content_blocks: Optional[List[dict]]):
+    with spilled_system_prompt(system_prompt) as (inline_prompt, prompt_file):
+        return _spawn_once(prompt, model, session_id, inline_prompt, prompt_file,
+                           raw_model, content_blocks)
+
+
+def _start_error(exc: OSError) -> str:
+    if isinstance(exc, FileNotFoundError):
+        return "claude CLI not found at '%s'" % settings.claude_bin
+    return "could not start claude CLI: %s" % exc
+
+
+def _spawn_once(prompt: str, model: Optional[str], session_id: Optional[str],
+                system_prompt: Optional[str], system_prompt_file: Optional[str],
+                raw_model: bool, content_blocks: Optional[List[dict]]):
     stream_input = content_blocks is not None
     cmd = build_cmd(model, session_id, stream=stream_input, system_prompt=system_prompt,
-                    raw_model=raw_model, stream_input=stream_input)
+                    raw_model=raw_model, stream_input=stream_input,
+                    system_prompt_file=system_prompt_file)
     try:
         proc = subprocess.run(
             cmd,
@@ -118,9 +200,10 @@ def _run_claude_once(prompt: str, model: Optional[str], session_id: Optional[str
             encoding="utf-8",
             timeout=settings.timeout,
             env=cli_env(raw_model),
+            creationflags=NO_WINDOW,
         )
-    except FileNotFoundError:
-        return None, error(500, "claude CLI not found at '%s'" % settings.claude_bin)
+    except OSError as exc:
+        return None, error(500, _start_error(exc))
     except subprocess.TimeoutExpired:
         return None, error(504, "claude CLI timed out after %ds" % settings.timeout)
     if not stream_input:
@@ -134,6 +217,7 @@ def _run_claude_once(prompt: str, model: Optional[str], session_id: Optional[str
         except json.JSONDecodeError:
             return None, error(502, "claude CLI returned invalid JSON")
     result_event = None
+    stop_reason = None
     for line in proc.stdout.splitlines():
         line = line.strip()
         if not line:
@@ -142,9 +226,12 @@ def _run_claude_once(prompt: str, model: Optional[str], session_id: Optional[str
             event = json.loads(line)
         except json.JSONDecodeError:
             continue
-        if event.get("type") == "result":
+        if event.get("type") == "assistant":
+            stop_reason = (event.get("message") or {}).get("stop_reason") or stop_reason
+        elif event.get("type") == "result":
             result_event = event
     if result_event is not None:
+        result_event.setdefault("stop_reason", stop_reason)
         return result_event, None
     err = (proc.stderr or "").strip()
     if not err:
@@ -155,9 +242,20 @@ def _run_claude_once(prompt: str, model: Optional[str], session_id: Optional[str
 def claude_events(prompt: str, model: Optional[str] = None, session_id: Optional[str] = None,
                   system_prompt: Optional[str] = None, raw_model: bool = False,
                   content_blocks: Optional[List[dict]] = None):
+    # The temp file (if any) must outlive the CLI process, so it is removed
+    # only when this generator finishes or is closed.
+    with spilled_system_prompt(system_prompt) as (inline_prompt, prompt_file):
+        yield from _stream_events(prompt, model, session_id, inline_prompt, prompt_file,
+                                  raw_model, content_blocks)
+
+
+def _stream_events(prompt: str, model: Optional[str], session_id: Optional[str],
+                   system_prompt: Optional[str], system_prompt_file: Optional[str],
+                   raw_model: bool, content_blocks: Optional[List[dict]]):
     stream_input = content_blocks is not None
     cmd = build_cmd(model, session_id, stream=True, system_prompt=system_prompt,
-                    raw_model=raw_model, stream_input=stream_input)
+                    raw_model=raw_model, stream_input=stream_input,
+                    system_prompt_file=system_prompt_file)
     stderr_file = tempfile.TemporaryFile(mode="w+", encoding="utf-8")
     try:
         proc = subprocess.Popen(
@@ -169,10 +267,11 @@ def claude_events(prompt: str, model: Optional[str] = None, session_id: Optional
             encoding="utf-8",
             start_new_session=True,
             env=cli_env(raw_model),
+            creationflags=NO_WINDOW,
         )
-    except FileNotFoundError:
+    except OSError as exc:
         stderr_file.close()
-        yield {"kind": "error", "message": "claude CLI not found at '%s'" % settings.claude_bin}
+        yield {"kind": "error", "message": _start_error(exc)}
         return
 
     def feed_stdin():
@@ -186,6 +285,7 @@ def claude_events(prompt: str, model: Optional[str] = None, session_id: Optional
     timer = threading.Timer(settings.timeout, kill_process, args=(proc,))
     timer.start()
     got_result = False
+    stop_reason = None
     try:
         for line in proc.stdout:
             line = line.strip()
@@ -197,6 +297,7 @@ def claude_events(prompt: str, model: Optional[str] = None, session_id: Optional
                 continue
             etype = event.get("type")
             if etype == "assistant":
+                stop_reason = event.get("message", {}).get("stop_reason") or stop_reason
                 for block in event.get("message", {}).get("content", []):
                     if block.get("type") == "text" and block.get("text"):
                         yield {"kind": "text", "text": block["text"]}
@@ -210,6 +311,7 @@ def claude_events(prompt: str, model: Optional[str] = None, session_id: Optional
                     "is_error": event.get("is_error", False),
                     "result": event.get("result", ""),
                     "usage": event.get("usage") or {},
+                    "stop_reason": event.get("stop_reason") or stop_reason,
                 }
         proc.wait()
         if not got_result:

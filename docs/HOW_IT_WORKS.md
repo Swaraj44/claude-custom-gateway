@@ -200,12 +200,12 @@ Parameters: {"type":"object","properties":{"city":{"type":"string"}},"required":
 
 ```bash
 claude -p --output-format json \
-  --tools "" --strict-mcp-config \
+  --tools "" --strict-mcp-config --no-session-persistence \
   --system-prompt "You are a concise assistant.\n\n# Tool Use\n..." \
   --model sonnet
 ```
 
-`--tools "" --strict-mcp-config` disables *all* Claude Code built-in tools and MCP servers, so the model answers purely from the messages the client sent — it can never read/write files itself. Tool execution is entirely the client's job.
+`--tools "" --strict-mcp-config` disables *all* Claude Code built-in tools and MCP servers, so the model answers purely from the messages the client sent — it can never read/write files itself. Tool execution is entirely the client's job. `--no-session-persistence` stops the CLI from saving a transcript of each one-shot request (the whole resent conversation) under `~/.claude/projects/`.
 
 ### 2.4 Parse the reply (`parse_function_calls`)
 
@@ -340,7 +340,7 @@ Event mapping (`app/claude_cli.py:claude_events` → `app/apis/chat.py` / `app/o
 The `claude` CLI puts cache breakpoints on the system prompt but **not** on the user message, so on its own only the system prompt is reused — the conversation history would be re-written to cache (at 1.25–2× input price) on every turn. The bridge fixes this:
 
 1. The conversation is sent as one content block per turn behind a fixed header (see [2.1](#21-flatten-messages-into-a-transcript-messages_to_prompt)), so each request is a block-for-block prefix of the next.
-2. The last block carries `cache_control: {"type": "ephemeral", "ttl": "1h"}` (`CLAUDE_SERVICE_PROMPT_CACHE_TTL`). The TTL must match the CLI's own breakpoints (`1h` on subscription logins), because a `1h` breakpoint may not follow a `5m` one.
+2. The last block carries `cache_control: {"type": "ephemeral", "ttl": "1h"}` (`CLAUDE_SERVICE_PROMPT_CACHE_TTL`, `1h` or `off`). Newer CLIs (seen on 2.1.325) add their own `1h` breakpoint after the user message, so the marker is redundant there and `off` caches just as well. A `5m` marker is no longer supported: the API rejects a `1h` breakpoint that follows a `5m` one, so `5m` is treated as `off`.
 3. The CLI is run with a clean environment: variables inherited from a parent Claude Code session (which would add a per-call scratchpad path to every prompt) are dropped, and `CLAUDE.md` / auto-memory are disabled for `/v1` calls.
 
 Verified live (Claude Code 2.1.267, sonnet, ~17k-token system prompt + tools, 11k-token first user message):

@@ -4,6 +4,8 @@
 
 > **In short:** you authenticate once with the Claude CLI, run this service locally, and any OpenAI-compatible tool can talk to Claude through it.
 
+> **Three ways to install:** run from source with a virtualenv (this README, Steps 1-3), install the Ubuntu/Debian `.deb` package that runs the gateway as a systemd service, or install it on Windows as a Task Scheduler task — see [INSTALL.md](INSTALL.md).
+
 ---
 
 ## Table of Contents
@@ -12,7 +14,9 @@
 - [Step 1 — Install &amp; Authenticate the Claude CLI](#step-1--install--authenticate-the-claude-cli)
 - [Step 2 — Set Up This Project](#step-2--set-up-this-project)
 - [Step 3 — Run the Service](#step-3--run-the-service)
-- [Configuration](#configuration)
+- [Configuration](#configuration-environment-variables)
+- [Install as a systemd service (.deb)](#install-as-a-systemd-service-deb)
+- [Install as a Windows Task Scheduler task](#install-as-a-windows-task-scheduler-task)
 - [Connect Third-Party Coding Agents](#connect-third-party-coding-agents)
 - [Endpoints](#endpoints)
 - [API Examples](#api-examples)
@@ -33,7 +37,7 @@
 
 > **Important:** This service does not handle Claude authentication itself — it shells out to the `claude` CLI. You **must** install the CLI and log in before using this project.
 
-> **Platform support:** These setup instructions have been **fully tested on Linux**. The Windows and macOS instructions are provided as guidance but **have not been tested yet** — if you hit a problem on those platforms, see [Troubleshooting](#troubleshooting).
+> **Platform support:** These setup instructions have been **fully tested on Linux** and, for the Windows Command Prompt setup and the Task Scheduler installer, on **Windows**. The macOS and Windows PowerShell instructions are provided as guidance but **have not been tested yet** — if you hit a problem on those platforms, see [Troubleshooting](#troubleshooting).
 
 ## Step 1 — Install & Authenticate the Claude CLI
 
@@ -157,7 +161,7 @@ pip install -r requirements.txt
 > Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
 > ```
 
-### Windows (Command Prompt, untested)
+### Windows (Command Prompt, tested)
 
 ```bat
 git clone <repository-url>
@@ -200,9 +204,9 @@ claude-custom-gateway
 
 Installing the package also adds two commands that choose whether request/response payloads are logged:
 
-| Command          | Payload logging | Use for                                                                                     |
-| ---------------- | --------------- | ------------------------------------------------------------------------------------------- |
-| `claude-pro`   | Off             | Normal use — same as `python -m app`; only uvicorn's one-line access log is printed        |
+| Command          | Payload logging | Use for                                                                                           |
+| ---------------- | --------------- | ------------------------------------------------------------------------------------------------- |
+| `claude-pro`   | Off             | Normal use — same as `python -m app`; only uvicorn's one-line access log is printed            |
 | `claude-debug` | On              | Debugging — prints every request body (`-->`) and response body (`<--`), pretty-printed JSON |
 
 ```bash
@@ -232,11 +236,13 @@ Streaming (SSE) responses still reach the client chunk by chunk; the full body i
 | `CLAUDE_SERVICE_PORT`             | `6069`    | Port                                                                                                                                                                                                                                                                                                                            |
 | `CLAUDE_SERVICE_TIMEOUT`          | `600`     | Per-request timeout in seconds                                                                                                                                                                                                                                                                                                  |
 | `CLAUDE_SERVICE_API_KEY`          | `swaraj`  | API key required on all`/api/*` and `/v1/*` endpoints via `Authorization: Bearer <key>` or `x-api-key` header. Empty = disable                                                                                                                                                                                          |
-| `CLAUDE_SERVICE_VISION_MODEL`     | `sonnet`  | Model used for `/v1/chat/completions` requests that contain images and omit `model` |
-| `CLAUDE_SERVICE_PROMPT_CACHE_TTL` | `1h`      | Prompt-cache TTL for conversation history on`/v1/chat/completions` (`1h`, `5m`, or `off`). Each turn reads earlier turns from cache instead of re-sending them at full price. Must match the CLI's own cache TTL: `1h` for Claude subscription logins; try `5m` if requests fail with a `cache_control.ttl` error |
+| `CLAUDE_SERVICE_MODELS`           | _(unset)_ | Comma-separated model IDs for `/v1/models`. When unset, the list is read from the Claude CLI's model catalog cache (`~/.claude/cache/model-catalog/`, or `$CLAUDE_CONFIG_DIR`) — the same models shown in Claude Code's `/model` picker — falling back to `sonnet, opus, haiku`                                     |
+| `CLAUDE_SERVICE_VISION_MODEL`     | `sonnet`  | Model used for `/v1/chat/completions` requests that contain images and omit `model`                                                                                                                                                                                                                                         |
+| `CLAUDE_SERVICE_PROMPT_CACHE_TTL` | `1h`      | Prompt-cache TTL for conversation history on`/v1/chat/completions` (`1h` or `off`). Each turn reads earlier turns from cache instead of re-sending them at full price. Recent CLI versions cache the history themselves, so `off` costs nothing there; set `off` if requests fail with a `cache_control.ttl` error. `5m` is no longer supported and is treated as `off` |
 | `CLAUDE_SERVICE_EFFORT`           | _(unset)_ | Optional`--effort` level (`low`, `medium`, `high`, `xhigh`, `max`) for `/v1/chat/completions`. Lower effort = fewer thinking/output tokens                                                                                                                                                                        |
-| `CLAUDE_SERVICE_LOG_PAYLOADS`     | `0`       | Log every request/response body (`1` to enable). `claude-debug` forces it on, `claude-pro` forces it off; applies to `python -m app` / `claude-custom-gateway` |
-| `CLAUDE_SERVICE_LOG_PAYLOAD_MAX`  | `0`       | Truncate each logged payload to this many characters (`0` = no limit)                                                                                     |
+| `CLAUDE_SERVICE_CLAUDE_BIN`       | _(auto)_  | Path to the `claude` CLI. Unset = auto-detect: `PATH`, then `~/.local/bin`, `~/.claude/local`, `~/.npm-global/bin`, `/usr/local/bin`, then the newest binary bundled with the Claude Code VS Code / Cursor extension                                                                                                |
+| `CLAUDE_SERVICE_LOG_PAYLOADS`     | `0`       | Log every request/response body (`1` to enable). `claude-debug` forces it on, `claude-pro` forces it off; applies to `python -m app` / `claude-custom-gateway`                                                                                                                                                        |
+| `CLAUDE_SERVICE_LOG_PAYLOAD_MAX`  | `0`       | Truncate each logged payload to this many characters (`0` = no limit)                                                                                                                                                                                                                                                         |
 
 **Set a variable before launching — per OS:**
 
@@ -252,12 +258,38 @@ python -m app
 ```
 
 ```bat
-:: Windows (Command Prompt) — untested
+:: Windows (Command Prompt)
 set CLAUDE_SERVICE_PORT=9000
 python -m app
 ```
 
 See [`.env.example`](.env.example) for reference (the service reads process environment variables; it does not load the file automatically).
+
+> Note: `.env.example` lists every variable with its built-in default (commented-out lines are optional and unset by default).
+
+### Install as a systemd service (.deb)
+
+For a persistent Ubuntu/Debian deployment, build and install the `.deb` package instead of running from source:
+
+```bash
+./packaging/build-deb.sh          # -> dist/claude-custom-gateway_<version>_<arch>.deb
+sudo apt install ./dist/claude-custom-gateway_*.deb
+sudo nano /etc/default/claude-custom-gateway   # set CLAUDE_SERVICE_API_KEY at minimum
+sudo systemctl enable --now claude-custom-gateway@$USER
+```
+
+The service runs as the chosen user, so the `claude` CLI must be installed and logged in as that user. The packaged config file uses the same `CLAUDE_SERVICE_*` variables listed above. Full instructions (prerequisites, upgrade, uninstall, troubleshooting) are in [INSTALL.md](INSTALL.md); internals of the package are in [packaging/README.md](packaging/README.md).
+
+### Install as a Windows Task Scheduler task
+
+For a persistent Windows deployment, run the installer from a checkout of this repo (requires Python 3.9+ and a logged-in `claude` CLI):
+
+```powershell
+powershell -ExecutionPolicy Bypass -File packaging\windows\install.ps1              # start at logon
+powershell -ExecutionPolicy Bypass -File packaging\windows\install.ps1 -AtStartup   # start at boot (admin)
+```
+
+It creates a virtualenv in `%LOCALAPPDATA%\claude-custom-gateway`, registers the `ClaudeCustomGateway` scheduled task, and writes `config.env` (random API key, bound to `127.0.0.1`). See [INSTALL.md](INSTALL.md#windows-task-scheduler) for details.
 
 ---
 
@@ -276,14 +308,14 @@ The service implements the OpenAI-compatible `/v1/models` and `/v1/chat/completi
 3. Scroll to the bottom and click **Custom provider**.
 4. Fill in the custom provider dialog:
 
-   | Field                  | Value                                                                                                                     |
-   | ---------------------- | ------------------------------------------------------------------------------------------------------------------------- |
-   | **Provider ID**  | `claude-cli`                                                                                                            |
-   | **Display name** | `Claude CLI (local)`                                                                                                    |
-   | **Provider API** | `OpenAI Compatible`                                                                                                     |
-   | **Base URL**     | `http://127.0.0.1:6069/v1` (agent on the same machine) or `http://<your-LAN-IP>:6069/v1` (remote machine)             |
-   | **API key**      | `swaraj` (default) — or your `CLAUDE_SERVICE_API_KEY` value                                                          |
-   | **Models**       | auto-fetched — click the models field and pick from the list (`sonnet`, `opus`, `haiku`) or add model IDs manually |
+   | Field                  | Value                                                                                                                                                                                        |
+   | ---------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+   | **Provider ID**  | `claude-cli`                                                                                                                                                                               |
+   | **Display name** | `Claude CLI (local)`                                                                                                                                                                       |
+   | **Provider API** | `OpenAI Compatible`                                                                                                                                                                        |
+   | **Base URL**     | `http://127.0.0.1:6069/v1` (agent on the same machine) or `http://<your-LAN-IP>:6069/v1` (remote machine)                                                                                |
+   | **API key**      | `swaraj` (default) — or your `CLAUDE_SERVICE_API_KEY` value                                                                                                                             |
+   | **Models**       | auto-fetched — click the models field and pick from the list (aliases like `sonnet`/`opus` plus every full model ID the CLI offers, e.g. `claude-opus-4-6`) or add model IDs manually |
 5. Click **Submit**. The models now appear in Kilo Code's model picker.
 6. Select the model (e.g. `sonnet`) and start chatting. Every request is routed through your local `claude` CLI.
 
@@ -297,7 +329,7 @@ Point the client at the base URL `http://<host>:6069/v1` with the API key above,
 - **Images are supported:** `user` messages with content-part arrays may include `{"type": "image_url", "image_url": {"url": "data:image/png;base64,..."}}` (JPEG/PNG/GIF/WebP data URLs). When images are present, the service sends the conversation to the CLI as a stream-json user message containing base64 image blocks — so pasting screenshots into Kilo Code works. Remote (`http:///https://`) image URLs are not fetched; they are skipped.
 - The service extracts the `system` message and passes it to the CLI via `--system-prompt` (replacing Claude Code's own agent system prompt).
 - The remaining messages are flattened into a conversation transcript and sent to `claude -p` via stdin.
-- **Raw-model mode:** `/v1/*` requests run the CLI with all tools disabled (`--tools "" --strict-mcp-config`), so the model answers only from the messages the client sends — it never reads or writes files itself. Tool execution is the client's job.
+- **Raw-model mode:** `/v1/*` requests run the CLI with all tools disabled (`--tools "" --strict-mcp-config`, plus `--no-session-persistence` for one-shot calls so no transcript is saved to disk), so the model answers only from the messages the client sends — it never reads or writes files itself. Tool execution is the client's job.
 - **Function-calling bridge:** when the request contains `tools`, their JSON schemas are injected into the system prompt with instructions to call them using `<tool_call name="..."><arg name="...">value</arg></tool_call>` blocks. (Claude's native `<function_calls>`/`<invoke>` syntax is deliberately avoided: written as plain text, the API mistakes it for a real tool call and the CLI replies "The model's tool call could not be parsed".) Previous assistant `tool_calls` are rendered back into that format in the transcript, and `tool` role messages become `<tool_result name="...">` blocks. When the model's reply contains `<tool_call>` blocks, they are parsed back into OpenAI `tool_calls` with `finish_reason: "tool_calls"` — the parser tolerates unclosed blocks, markdown code fences, and the legacy `<function_calls>` syntax. Non-string argument values (numbers, booleans, arrays, objects) are converted from JSON form.
 - With tools present, streaming responses are buffered until generation completes (tool calls must be parsed whole), so the first chunk arrives after the model finishes. Without tools, chunks stream live.
 - The native `/api/*` endpoints keep the CLI's full agent capabilities (it can read/analyze files in its working directory).
@@ -444,12 +476,17 @@ curl -H "Authorization: Bearer swaraj" http://127.0.0.1:6069/v1/models
 {
   "object": "list",
   "data": [
-    {"id": "sonnet", "object": "model", "created": 1760000000, "owned_by": "claude-cli"},
-    {"id": "opus",   "object": "model", "created": 1760000000, "owned_by": "claude-cli"},
-    {"id": "haiku",  "object": "model", "created": 1760000000, "owned_by": "claude-cli"}
+    {"id": "sonnet", "object": "model", "created": 1760000000, "owned_by": "claude-cli",
+     "name": "Sonnet (latest: Sonnet 5.5)", "description": "Alias for the latest sonnet model", "alias_for": "claude-sonnet-5-5"},
+    {"id": "claude-opus-5-5", "object": "model", "created": 1760000000, "owned_by": "claude-cli",
+     "name": "Opus 5.5", "description": "For complex work and everyday tasks", "alias_for": null},
+    {"id": "claude-opus-4-6", "object": "model", "created": 1760000000, "owned_by": "claude-cli",
+     "name": "Opus 4.6", "description": null, "alias_for": null}
   ]
 }
 ```
+
+The list mirrors Claude Code's `/model` picker: the aliases (`sonnet`, `opus`, `haiku`, `fable`) followed by every full model ID in the CLI's cached model catalog (`~/.claude/cache/model-catalog/*-cc.json`). It is re-read whenever that cache changes, so new models appear without restarting the gateway. If the cache doesn't exist yet, run `claude` once (as the service user) to populate it.
 
 Model IDs map directly to the CLI's `--model` flag — any alias or full model name the CLI accepts (e.g. `sonnet`, `claude-opus-5`) can be used.
 
@@ -550,17 +587,18 @@ client <──SSE──── FastAPI (uvicorn) <─JSONL── claude
 
 ## Troubleshooting
 
-| Problem                                                   | Fix                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
-| --------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `claude: command not found` / `claude` not recognized | The CLI is not on PATH. Reopen your terminal after installing, or reinstall via the commands in[Step 1](#step-1--install--authenticate-the-claude-cli). On Windows the CLI may be at `%USERPROFILE%\.local\bin\claude.exe`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
-| `500` from the service — CLI not found                 | Same as above: the service shells out to`claude`, so it must be on the PATH of the shell that started the service. Restart the service after fixing PATH.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
-| `401` from the service                                  | Send the API key:`Authorization: Bearer <key>` or `x-api-key` header. The key is `CLAUDE_SERVICE_API_KEY` (default `swaraj`).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
-| CLI asks for login / requests fail                        | Run`claude` once in a terminal and complete authentication before starting the service.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
-| PowerShell blocks venv activation                         | `Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser`, or use Command Prompt with `.venv\Scripts\activate.bat`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
-| Port already in use                                       | `CLAUDE_SERVICE_PORT=9000 python -m app` (or the PowerShell/CMD equivalents above).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
-| `python` vs `python3`                                 | On many Linux/macOS systems the command is`python3`. Use whichever exists on your machine.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
-| Agent on another machine can't connect                    | Use the LAN IP (not`127.0.0.1`) in the base URL, ensure port 6069 is open in the firewall, and check the service is running (`curl http://<host>:6069/health`).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
-| Tool calls fail / stall in Kilo Code                      | The gateway itself supports single, parallel, and multi-round tool calls (verified by the test suite and live). Check, in order: (1) the API key in the Kilo Code provider matches`CLAUDE_SERVICE_API_KEY` (default `swaraj`); (2) the model ID is one of `sonnet`/`opus`/`haiku`; (3) the service process is running and watch its console — mid-stream CLI failures are emitted as `[service error] ...` text; (4) tool-call streaming is buffered (the whole generation arrives at once), so give long agent turns time — don't cancel early. If tools fail on a machine where `pytest` was never run, missing Python deps (`fastapi`, `pydantic`) cause `ModuleNotFoundError` on startup, not tool failures — reinstall with `pip install -r requirements.txt` inside the venv. |
+| Problem                                                                                                                               | Fix                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| ------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `claude: command not found` / `claude` not recognized                                                                             | The CLI is not on PATH. Reopen your terminal after installing, or reinstall via the commands in[Step 1](#step-1--install--authenticate-the-claude-cli). On Windows the CLI may be at `%USERPROFILE%\.local\bin\claude.exe`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| `500` from the service — CLI not found / `[service error] claude CLI not found at 'claude'`                                      | The service could not find the `claude` binary. It checks `CLAUDE_SERVICE_CLAUDE_BIN`, then `PATH`, then common install dirs (`~/.local/bin`, `~/.claude/local`, `~/.npm-global/bin`, `/usr/local/bin`), then the binary bundled with the Claude Code VS Code extension. Run `claude --version` in the same shell; if it fails, see the next row or reinstall via [Step 1](#step-1--install--authenticate-the-claude-cli). Or point the service at the binary directly: `CLAUDE_SERVICE_CLAUDE_BIN=/path/to/claude`. `GET /health` shows which binary is in use. Restart the service after any fix.                                                                                                                                                                                       |
+| `claude` vanished after an auto-update (npm install) / `npm install -g` fails with `ENOTEMPTY ... rename ... .claude-code-XXXX` | An interrupted CLI auto-update left npm's install half-done: the `claude` symlink is gone and a stale backup dir blocks reinstalling. Remove the leftovers, then reinstall: `rm -rf ~/.npm-global/lib/node_modules/@anthropic-ai/.claude-code-* ~/.npm-global/bin/.claude-*` (adjust for your `npm config get prefix`), then `npm install -g @anthropic-ai/claude-code` and `hash -r && claude --version`.                                                                                                                                                                                                                                                                                                                                                                                         |
+| `401` from the service                                                                                                              | Send the API key:`Authorization: Bearer <key>` or `x-api-key` header. The key is `CLAUDE_SERVICE_API_KEY` (default `swaraj`).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| CLI asks for login / requests fail                                                                                                    | Run`claude` once in a terminal and complete authentication before starting the service.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| PowerShell blocks venv activation                                                                                                     | `Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser`, or use Command Prompt with `.venv\Scripts\activate.bat`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| Port already in use                                                                                                                   | `CLAUDE_SERVICE_PORT=9000 python -m app` (or the PowerShell/CMD equivalents above).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| `python` vs `python3`                                                                                                             | On many Linux/macOS systems the command is`python3`. Use whichever exists on your machine.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| Agent on another machine can't connect                                                                                                | Use the LAN IP (not`127.0.0.1`) in the base URL, ensure port 6069 is open in the firewall, and check the service is running (`curl http://<host>:6069/health`).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| Tool calls fail / stall in Kilo Code                                                                                                  | The gateway itself supports single, parallel, and multi-round tool calls (verified by the test suite and live). Check, in order: (1) the API key in the Kilo Code provider matches`CLAUDE_SERVICE_API_KEY` (default `swaraj`); (2) the model ID is one of `sonnet`/`opus`/`haiku`; (3) the service process is running and watch its console — mid-stream CLI failures are emitted as `[service error] ...` text; (4) tool-call streaming is buffered (the whole generation arrives at once), so give long agent turns time — don't cancel early. If tools fail on a machine where `pytest` was never run, missing Python deps (`fastapi`, `pydantic`) cause `ModuleNotFoundError` on startup, not tool failures — reinstall with `pip install -r requirements.txt` inside the venv. |
 
 ---
 

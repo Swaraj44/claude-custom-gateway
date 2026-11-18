@@ -10,6 +10,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app import __version__
 from app.config import settings
+from app.models import model_ids
 from app.apis import api_router
 from app import payload_logging
 from app.payload_logging import PayloadLoggingMiddleware
@@ -50,8 +51,10 @@ app = create_app()
 
 
 def main() -> None:
-    if shutil.which("claude") is None:
-        print("warning: 'claude' CLI not found on PATH; requests will fail until it is available", file=sys.stderr)
+    if shutil.which(settings.claude_bin) is None:
+        print("warning: claude CLI not found (looked for '%s'); install it or set "
+              "CLAUDE_SERVICE_CLAUDE_BIN, requests will fail until it is available"
+              % settings.claude_bin, file=sys.stderr)
     print("Claude Custom Gateway (FastAPI) running")
     print("  Web UI:    http://%s:%d/" % (settings.host, settings.port))
     print("  Chat API:  POST http://%s:%d/api/chat" % (settings.host, settings.port))
@@ -67,7 +70,7 @@ def main() -> None:
     if settings.api_key:
         print("  Auth:      API key required (CLAUDE_SERVICE_API_KEY is set)")
     print("  Claude:    %s | timeout: %ds | models: %s"
-          % (settings.claude_bin, settings.timeout, ", ".join(settings.models)))
+          % (settings.claude_bin, settings.timeout, ", ".join(model_ids())))
     print("Press Ctrl+C to stop")
     uvicorn.run(app, host=settings.host, port=settings.port, log_level="info")
 

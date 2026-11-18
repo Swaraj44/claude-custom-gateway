@@ -3,6 +3,7 @@ from fastapi.testclient import TestClient
 
 from app.config import settings
 from app.main import app
+from app.models import model_ids
 
 client = TestClient(app)
 
@@ -30,7 +31,7 @@ def test_models_listed():
     r = client.get("/v1/models", headers=auth_headers())
     assert r.status_code == 200
     ids = [m["id"] for m in r.json()["data"]]
-    assert ids == list(settings.models)
+    assert ids == model_ids()
 
 
 @pytest.mark.skipif(not settings.api_key, reason="auth disabled")

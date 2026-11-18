@@ -13,17 +13,23 @@ import re
 import uuid
 from typing import Any, List, Optional
 
-TOOL_CALL_RE = re.compile(r'<tool_call\s+name="([^"]+)"\s*>(.*?)</tool_call>', re.DOTALL)
-TOOL_CALL_OPEN_RE = re.compile(r'<tool_call\s+name="([^"]+)"\s*>')
-ARG_RE = re.compile(r'<arg\s+name="([^"]+)"\s*>(.*?)</arg>', re.DOTALL)
-ARG_OPEN_RE = re.compile(r'<arg\s+name="([^"]+)"\s*>')
+# Tag names may be single- or double-quoted, close tags may carry stray spaces.
+TOOL_CALL_RE = re.compile(r'<tool_call\s+name=["\']([^"\']+)["\']\s*>(.*?)</tool_call\s*>', re.DOTALL)
+TOOL_CALL_OPEN_RE = re.compile(r'<tool_call\s+name=["\']([^"\']+)["\']\s*>')
+# The value may not span another <arg> open tag: an unclosed argument must not
+# swallow the following, properly closed one.
+ARG_RE = re.compile(r'<arg\s+name=["\']([^"\']+)["\']\s*>((?:(?!<arg\s+name=).)*?)</arg\s*>', re.DOTALL)
+ARG_OPEN_RE = re.compile(r'<arg\s+name=["\']([^"\']+)["\']\s*>')
 
 # Legacy (native-looking) format, accepted when the model falls back to it.
 FUNCTION_CALLS_BLOCK_RE = re.compile(r"<function_calls>(.*?)</function_calls>", re.DOTALL)
-INVOKE_RE = re.compile(r'<invoke\s+name="([^"]+)"\s*>(.*?)</invoke>', re.DOTALL)
-INVOKE_OPEN_RE = re.compile(r'<invoke\s+name="([^"]+)"\s*>')
-PARAM_RE = re.compile(r'<parameter\s+name="([^"]+)"\s*>(.*?)</parameter>', re.DOTALL)
-PARAM_OPEN_RE = re.compile(r'<parameter\s+name="([^"]+)"\s*>')
+INVOKE_RE = re.compile(r'<invoke\s+name=["\']([^"\']+)["\']\s*>(.*?)</invoke\s*>', re.DOTALL)
+INVOKE_OPEN_RE = re.compile(r'<invoke\s+name=["\']([^"\']+)["\']\s*>')
+PARAM_RE = re.compile(r'<parameter\s+name=["\']([^"\']+)["\']\s*>((?:(?!<parameter\s+name=).)*?)</parameter\s*>', re.DOTALL)
+PARAM_OPEN_RE = re.compile(r'<parameter\s+name=["\']([^"\']+)["\']\s*>')
+
+# A half-written close tag at the end of a recovered fragment ("</arg", "</").
+PARTIAL_CLOSE_TAG_RE = re.compile(r"</[A-Za-z_]*\s*$")
 
 
 def xml_escape(s: str) -> str:
@@ -87,19 +93,43 @@ def strip_code_fences(content: str) -> str:
     return content.strip()
 
 
-def build_tool_call(name: str, body: str, param_re=PARAM_RE, param_open_re=PARAM_OPEN_RE) -> Optional[dict]:
+def _closed_params(body: str, closed_re) -> tuple:
+    params, spans = {}, []
+    for p in closed_re.finditer(body):
+        params[p.group(1).strip()] = coerce_param_value(html.unescape(p.group(2).strip()))
+        spans.append((p.start(), p.end()))
+    return params, spans
+
+
+def build_tool_call(name: str, body: str, param_re=PARAM_RE, param_open_re=PARAM_OPEN_RE,
+                    recover_unclosed: bool = False) -> Optional[dict]:
+    """Build one OpenAI tool_call from a tag body.
+
+    With recover_unclosed=True (the block's own close tag was present, so every
+    value is complete), an argument missing its close tag — e.g. an edit call
+    whose last <arg name="newString"> is never closed — is captured up to the
+    next argument or the end of the block instead of being dropped, which would
+    make clients reject the call with "<name> is missing and is required".
+    """
     if not name:
         return None
-    params = {}
-    for p in param_re.finditer(body):
-        params[p.group(1).strip()] = coerce_param_value(html.unescape(p.group(2).strip()))
-    if not params:
-        for p in param_open_re.finditer(body):
-            fragment = body[p.end():]
+    params, spans = _closed_params(body, param_re)
+    # Models sometimes slip into the other syntax mid-reply (<parameter> tags
+    # inside a <tool_call> block, or <arg> inside <invoke>); accept both.
+    alt_re = ARG_RE if param_re is PARAM_RE else PARAM_RE
+    for k, v in _closed_params(body, alt_re)[0].items():
+        params.setdefault(k, v)
+    if not params or recover_unclosed:
+        for m in param_open_re.finditer(body):
+            arg_name = m.group(1).strip()
+            if arg_name in params or any(s <= m.start() < e for s, e in spans):
+                continue
+            fragment = body[m.end():]
             nxt = param_open_re.search(fragment)
             if nxt:
                 fragment = fragment[: nxt.start()]
-            params[p.group(1).strip()] = coerce_param_value(html.unescape(fragment.strip()))
+            fragment = PARTIAL_CLOSE_TAG_RE.sub("", fragment)
+            params[arg_name] = coerce_param_value(html.unescape(fragment.strip()))
     return {
         "id": "call_" + uuid.uuid4().hex[:24],
         "type": "function",
@@ -107,18 +137,40 @@ def build_tool_call(name: str, body: str, param_re=PARAM_RE, param_open_re=PARAM
     }
 
 
+def reply_was_truncated(text: str) -> bool:
+    """True when the reply ends inside an unfinished tool-call block.
+
+    A <tool_call> (or <invoke>) that is opened but never closed means the
+    generation was cut off mid-call — in practice, the token limit was hit.
+    """
+    for open_re, closed_re in ((TOOL_CALL_OPEN_RE, TOOL_CALL_RE),
+                               (INVOKE_OPEN_RE, INVOKE_RE)):
+        opens = list(open_re.finditer(text))
+        if not opens:
+            continue
+        last = opens[-1].start()
+        if not any(m.start() <= last < m.end() for m in closed_re.finditer(text)):
+            return True
+    return False
+
+
 def parse_tool_call_tags(text: str):
     """Parse <tool_call> blocks; returns (calls, start, end) spanning all of them."""
     matches = list(TOOL_CALL_RE.finditer(text))
     if matches:
-        calls = [build_tool_call(m.group(1).strip(), m.group(2), ARG_RE, ARG_OPEN_RE) for m in matches]
+        calls = [build_tool_call(m.group(1).strip(), m.group(2), ARG_RE, ARG_OPEN_RE,
+                                 recover_unclosed=True) for m in matches]
         return [c for c in calls if c], matches[0].start(), matches[-1].end()
     # Truncated reply: an opening tag with no closing tag.
     opens = list(TOOL_CALL_OPEN_RE.finditer(text))
     calls = []
     for i, m in enumerate(opens):
-        body = text[m.end(): opens[i + 1].start() if i + 1 < len(opens) else len(text)]
-        call = build_tool_call(m.group(1).strip(), body, ARG_RE, ARG_OPEN_RE)
+        bounded = i + 1 < len(opens)
+        body = text[m.end(): opens[i + 1].start() if bounded else len(text)]
+        # The last block may be cut off mid-argument, so a half-written value
+        # there is still dropped rather than passed on.
+        call = build_tool_call(m.group(1).strip(), body, ARG_RE, ARG_OPEN_RE,
+                               recover_unclosed=bounded)
         if call:
             calls.append(call)
     if calls:
@@ -129,7 +181,7 @@ def parse_tool_call_tags(text: str):
 def parse_invokes(block: str) -> List[dict]:
     calls = []
     for inv in INVOKE_RE.finditer(block):
-        call = build_tool_call(inv.group(1).strip(), inv.group(2))
+        call = build_tool_call(inv.group(1).strip(), inv.group(2), recover_unclosed=True)
         if call:
             calls.append(call)
     if calls:
@@ -205,6 +257,7 @@ def build_tools_section(tools: List[dict], tool_choice: Optional[Any] = None) ->
         "",
         "Rules:",
         "- Use exactly this <tool_call>/<arg> format for every call.",
+        "- Close every tag: each <arg> needs its </arg>, each <tool_call> its </tool_call>.",
         "- Argument values: strings as plain text; numbers, booleans, arrays, and objects in JSON form.",
         "- To call several functions, write several <tool_call> blocks one after another.",
         "- Put tool calls at the END of your reply, never inside code fences.",
